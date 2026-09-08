@@ -1313,10 +1313,10 @@ class saarelma_connor_sc(saarelma_connor):
             # Refreeze E and D_KBM from the current iterate.
             ne_curr_sorted = n0 * N.dat.data[sort_idx]
             E_new = self._exp_kernel_sc(ne_curr_sorted, x_sorted)[unsort_idx]
-            if not E_initialised:
+            if not E_initialised: # first step in loop
                 E_fd.dat.data[:] = E_new
                 E_initialised = True
-            else:
+            else: # all other steps in the loop
                 E_fd.dat.data[:] = (
                     picard_relax * E_new
                     + (1.0 - picard_relax) * E_fd.dat.data
@@ -1356,7 +1356,7 @@ class saarelma_connor_sc(saarelma_connor):
                     f"alpha_bar = {self.alpha_bar_ped:.4f}, "
                     f"KBM {'ON' if gate_now else 'OFF'}"
                 )
-            if dn_rel < float(picard_rtol) and gate_now == prev_gate:
+            if abs(dn_rel) < float(picard_rtol) and gate_now == prev_gate:
                 picard_converged = True
                 break
             prev_hat_ne = hat_ne_new
