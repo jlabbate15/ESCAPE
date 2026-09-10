@@ -9,14 +9,18 @@ and builds its n_e initial guess *here*, so the four cannot drift apart.
 
 What a solver receives
 ======================
-Exactly two things, both in SI units:
+Three things, all in SI units:
 
 ``NeBCs``
-    the boundary-condition values and where they sit, and
+    the boundary-condition values and where they sit,
 
 ``ne_init``
     the initial n_e profile on whatever grid the caller asked for (each
-    solver is free to re-interpolate it onto its own mesh).
+    solver is free to re-interpolate it onto its own mesh), and
+
+``(nFC_init, nCX_init)``
+    the matching neutral initial guesses -- coupled three-equation
+    model only (:func:`build_neutral_initial_guess`).
 
 Nothing else about the boundary is assumed or looked up downstream.
 
@@ -65,6 +69,7 @@ a boundary condition, so it is resolved separately by
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.integrate import cumulative_trapezoid
 
 __all__ = [
     "NE_BC_LOCS",
@@ -366,6 +371,148 @@ def build_ne_initial_guess(model, x_grid, initial_guess, bcs,
         f"Unknown initial_guess={initial_guess!r}; expected 'linear', "
         "'pfile', 'tanh' or 'manual EPEDNN loop'."
     )
+
+
+
+def build_neutral_initial_guess(model, x_grid, ne_init,
+                                nFC_ic="solve", nCX_ic="solve"):
+    """SI neutral initial guesses ``(nFC_init, nCX_init)`` in m^-3 on
+    ``x_grid`` (m), for a given electron-density guess ``ne_init``.
+
+    Shared by both discretisations of the coupled three-equation model
+    (``solve_coupled_nondim`` and ``solve_coupled_nondim_scipy``) so the
+    two cannot drift apart, exactly as
+    :func:`build_ne_initial_guess` is shared for n_e.
+
+    Parameters
+    ----------
+    model : saarelma_connor
+        Supplies the frozen coefficient arrays on ``model.x_init`` and
+        the separatrix values ``nFC_x0`` / ``nCX_x0``.
+    x_grid : array_like
+        SI radial grid (m), 0 at the separatrix.  Need not be sorted;
+        the returned arrays follow the order of ``x_grid``.
+    ne_init : array_like
+        SI electron-density guess (m^-3) on ``x_grid``, e.g. from
+        :func:`build_ne_initial_guess`.
+    nFC_ic : {"solve", "manual EPEDNN loop"}
+        ``"solve"``
+            Integrate the FC neutral equation (Eq. (14) of Saarelma et
+            al. 2023) analytically at the frozen ``ne_init``.  With
+            n_e fixed the equation is exactly homogeneous and linear in
+            u = f_FC n_FC, so an integrating factor gives it in closed
+            form.
+        ``"manual EPEDNN loop"``
+            Interpolate the tabulated ``model.nFC_manual`` (given on
+            ``model.psi_N_n_manual``) onto ``x_grid``.
+    nCX_ic : {"solve", "scale nFC", "manual EPEDNN loop"}
+        ``"solve"``
+            Integrate the CX neutral equation (Eq. (10)) analytically at
+            the frozen ``ne_init`` *and* the FC guess just built,
+            keeping the FC source term.
+        ``"scale nFC"``
+            ``nCX_init = nFC_init * nCX_x0 / nFC_x0``.
+        ``"manual EPEDNN loop"``
+            As above, from ``model.nCX_manual``.
+
+    Notes
+    -----
+    Every branch is evaluated on the grid sorted in *descending* x, i.e.
+    integrating inward from the separatrix, where the Dirichlet data
+    ``nFC_x0`` / ``nCX_x0`` live; the results are scattered back into
+    the caller's ordering before being returned.
+    """
+    x_grid = np.asarray(x_grid, dtype=float)
+    ne_init = np.asarray(ne_init, dtype=float)
+
+    # Everything is built on the descending-x ordering (separatrix first),
+    # because that is the end that carries the neutral Dirichlet data.
+    order_desc = np.argsort(x_grid)[::-1]
+    x_desc = x_grid[order_desc]
+    ne_desc = ne_init[order_desc]                                   # m^-3
+    Si_desc = np.interp(x_desc, model.x_init, model.S_i_pres)
+    Scx_desc = np.interp(x_desc, model.x_init, model.S_cx_pres)
+    fFC_desc = np.interp(x_desc, model.x_init, model.fFC)
+    fCX_desc = np.interp(x_desc, model.x_init, model.fCX)
+    g_desc = np.interp(x_desc, model.x_init, model.gradr2_fsa)
+    Vcx_desc = np.interp(x_desc, model.x_init, np.abs(model.V_cx_pres))  # m/s
+
+    def _manual_on_desc(manual_arr):
+        """Interpolate a psi_N-tabulated manual profile onto x_desc."""
+        x_n_manual = np.interp(model.psi_N_n_manual, model.psi_N_pres,
+                               model.x_init)
+        return np.interp(x_desc, x_n_manual, manual_arr)
+
+    def _scatter(vals_desc):
+        out = np.empty_like(x_grid)
+        out[order_desc] = vals_desc
+        return out
+
+    # ---- n_FC --------------------------------------------------------
+    if nFC_ic == "solve":
+        # Eq. (14) of Saarelma et al. (2023) at frozen n_e:
+        #   |V_FC| d/dx[f_FC n_FC] = n_e (S_i + S_CX) n_FC,
+        # homogeneous in u = f_FC n_FC, so the integrating factor from
+        # the separatrix gives n_FC in closed form.
+        integrand_init = (
+            ne_desc * (Si_desc + Scx_desc) / (fFC_desc * abs(model.V_FC))
+        )
+        cumint_desc = cumulative_trapezoid(integrand_init, x_desc, initial=0.0)
+        nFC_on_desc = model.nFC_x0 * np.exp(cumint_desc)
+    elif nFC_ic == "manual EPEDNN loop":
+        nFC_on_desc = _manual_on_desc(model.nFC_manual)
+    else:
+        raise ValueError(
+            f"Unknown nFC_ic={nFC_ic!r}; expected 'solve' or "
+            "'manual EPEDNN loop'."
+        )
+
+    nFC_init = _scatter(nFC_on_desc)
+    if np.any(nFC_init < 0):
+        raise ValueError(
+            f"nFC_init = {nFC_init} is negative, which is not allowed."
+        )
+
+    # ---- n_CX --------------------------------------------------------
+    if nCX_ic == "solve":
+        # Initial guess for nCX from the n_CX fluid governing equation
+        # (Eq. (10) of Saarelma-Connor):
+        #
+        #   |V_CX| d/dx[ f_CX g n_CX ] = n_e (n_CX S_i - (S_CX/2) n_FC)
+        #
+        # Let u = f_CX g n_CX and tau = -x (inward distance, >= 0). Then
+        #   du/dtau = -P(tau) u + Q(tau)
+        # with
+        #   P = n_e S_i / (|V_CX| f_CX g)
+        #   Q = n_e S_CX n_FC / (2 |V_CX|)   <-- Note: f_CX is no longer here!
+        # Integrating factor nu(tau) = exp(int_0^tau P dtau') gives
+        #   u(tau) = (u(0) + int_0^tau nu Q dtau') / nu(tau)
+        # with u(0) = f_CX(0) * g(0) * nCX_x0.
+        # Finally, n_CX = u / (f_CX g).
+        tau_desc = -x_desc                              # >= 0, ascending from 0
+
+        P_desc = ne_desc * Si_desc / (Vcx_desc * fCX_desc * g_desc)
+        Q_desc = ne_desc * Scx_desc * nFC_on_desc / (2.0 * Vcx_desc)
+
+        int_P = cumulative_trapezoid(P_desc, tau_desc, initial=0.0)
+        nu_desc = np.exp(int_P)
+        nu_Q_int = cumulative_trapezoid(nu_desc * Q_desc, tau_desc, initial=0.0)
+
+        u_desc_0 = fCX_desc[0] * g_desc[0] * model.nCX_x0
+        u_desc = (u_desc_0 + nu_Q_int) / nu_desc
+
+        nCX_init = _scatter(u_desc / (fCX_desc * g_desc))
+    elif nCX_ic == "scale nFC":
+        nCX_init = nFC_init * model.nCX_x0 / model.nFC_x0
+    elif nCX_ic == "manual EPEDNN loop":
+        nCX_init = _scatter(_manual_on_desc(model.nCX_manual))
+    else:
+        raise ValueError(
+            f"Unknown nCX_ic={nCX_ic!r}; expected 'solve', 'scale nFC' or "
+            "'manual EPEDNN loop'."
+        )
+
+    return nFC_init, nCX_init
 
 
 def resolve_integration_constant(model, bc_origin="p-file", dne_dx_neginf=None):

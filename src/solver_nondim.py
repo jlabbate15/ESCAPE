@@ -908,6 +908,8 @@ class saarelma_connor_nondim(saarelma_connor):
                                    initial_guess="tanh",
                                    tanh_width=None,
                                    tanh_center=None,
+                                   nFC_ic="solve",
+                                   nCX_ic="solve",
                                    picard_gate_mode="average",
                                    picard_max_it=50,
                                    picard_rtol=1e-8,
@@ -975,6 +977,22 @@ class saarelma_connor_nondim(saarelma_connor):
         ``kbm_treatment="inline"`` (smoothed local gate) has hat_f
         depending on hat_n_e' as well, which would make Phi -> hat_n_e'
         a per-point root-find; that is not implemented here.
+
+        Initial guess
+        =============
+        n_e comes from ``bc_ig_helpers.build_ne_initial_guess``
+        (``initial_guess``, ``tanh_width``, ``tanh_center``) and the two
+        neutral profiles from
+        ``bc_ig_helpers.build_neutral_initial_guess`` (``nFC_ic``,
+        ``nCX_ic``) -- the same shared helpers, with the same options,
+        that the Firedrake path uses, so the two discretisations start
+        from identical SI profiles.  ``nFC_ic="solve"`` /
+        ``nCX_ic="solve"`` integrate the neutral equations analytically
+        at the frozen n_e guess; ``nFC_ic``/``nCX_ic``
+        ``="manual EPEDNN loop"`` read the tabulated EPED-NN profiles,
+        and ``nCX_ic="scale nFC"`` scales the FC guess by
+        nCX_x0 / nFC_x0.  The SI neutral densities are converted to the
+        flux variables U and W before being handed to ``solve_bvp``.
 
         Returns
         -------
@@ -1057,26 +1075,23 @@ class saarelma_connor_nondim(saarelma_connor):
             g_q = c['g'](hat_x_q)
             return g_q * (c['D_NEO'](hat_x_q) + D_KBM_q) + g_q * c['C_ETG'](hat_x_q) / N_q
 
-        # Neutral seeds by integrating factor at the guessed density: the FC
-        # equation is exactly U' = U * a(x) once hat_n_e is fixed, and the CX
-        # equation is seeded with its homogeneous solution (the FC source term
-        # is left to solve_bvp).  Both decay inward from the separatrix, which
-        # is the behaviour the collocation mesh has to resolve.
-        def neutral_seed(N_q, D_KBM_q):
-            g_q, fFC_q, fCX_q = c['g'](hat_x), c['fFC'](hat_x), c['fCX'](hat_x)
-            Vcx_q, Si_q, Scx_q = c['Vcx'](hat_x), c['Si'](hat_x), c['Scx'](hat_x)
-            a = N_q * (Si_q + Scx_q) / (VFC * fFC_q * g_q)
-            b = N_q * Si_q / (Vcx_q * fCX_q * g_q)
-            # int_0^x, i.e. measured back from the separatrix (last point)
-            Ia = cumulative_trapezoid(a, hat_x, initial=0.0)
-            Ib = cumulative_trapezoid(b, hat_x, initial=0.0)
-            U0 = hat_nFC_x0 * fFC_q[-1] * g_q[-1]
-            W0 = hat_nCX_x0 * Vcx_q[-1] * fCX_q[-1] * g_q[-1]
-            U_q = U0 * np.exp(np.clip(Ia - Ia[-1], -700.0, 700.0))
-            W_q = W0 * np.exp(np.clip(Ib - Ib[-1], -700.0, 700.0))
-            return U_q, W_q
+        # Neutral seeds from the shared helper in src/bc_ig_helpers.py --
+        # the *same* routine, on the same SI grid, that the firedrake path
+        # uses, so the two discretisations start from identical profiles
+        # and support the identical nFC_ic / nCX_ic options.  The SI
+        # densities are then converted into the flux variables this
+        # collocation system actually carries,
+        #     U = f_FC hat_g hat_n_FC,   W = hat_V_CX f_CX hat_g hat_n_CX.
+        nFC_init, nCX_init = bcig.build_neutral_initial_guess(
+            self, x_si, ne_init, nFC_ic=nFC_ic, nCX_ic=nCX_ic,
+        )
+        self.nFC_init = nFC_init
+        self.nCX_init = nCX_init
 
-        U_g, W_g = neutral_seed(N_g, hat_D_KBM)
+        g_q, fFC_q, fCX_q = c['g'](hat_x), c['fFC'](hat_x), c['fCX'](hat_x)
+        Vcx_q = c['Vcx'](hat_x)
+        U_g = (nFC_init / n0) * fFC_q * g_q
+        W_g = (nCX_init / n0) * Vcx_q * fCX_q * g_q
         Phi_g = conductance(hat_x, N_g, hat_D_KBM) * np.gradient(N_g, hat_x)
         Y_guess = np.vstack([N_g, Phi_g, U_g, W_g])
 
@@ -1475,6 +1490,8 @@ class saarelma_connor_nondim(saarelma_connor):
                 initial_guess=initial_guess,
                 tanh_width=tanh_width,
                 tanh_center=tanh_center,
+                nFC_ic=nFC_ic,
+                nCX_ic=nCX_ic,
                 picard_gate_mode=picard_gate_mode,
                 picard_max_it=picard_max_it,
                 picard_rtol=picard_rtol,
@@ -1598,86 +1615,12 @@ class saarelma_connor_nondim(saarelma_connor):
             gate_mode=gate_mode_input,
         )
 
-        if nFC_ic == "solve":
-            # use the initial guess for ne to get the initial guess for nFC from Eq. (14) in Saarelma et al. (2023)
-            order_desc = np.argsort(x_dofs_si)[::-1]
-            x_desc = x_dofs_si[order_desc]
-            ne_desc = ne_init[order_desc]  # SI m^-3; same ne guess used for nCX below
-            Si_desc = np.interp(x_desc, self.x_init, self.S_i_pres)
-            fFC_desc = np.interp(x_desc, self.x_init, self.fFC)
-            Scx_desc = np.interp(x_desc, self.x_init, self.S_cx_pres)
-            integrand_init = (
-                ne_desc * (Si_desc + Scx_desc) / (fFC_desc * abs(self.V_FC))
-            )
-            cumint_desc = cumulative_trapezoid(integrand_init, x_desc, initial=0.0)
-            nFC_on_desc = self.nFC_x0 * np.exp(cumint_desc)
-            nFC_init = np.empty_like(x_dofs_si)
-            nFC_init[order_desc] = nFC_on_desc
-            if any(nFC_init < 0):
-                raise ValueError(f"nFC_init = {nFC_init} is negative, which is not allowed.")
-        elif nFC_ic == "manual EPEDNN loop":
-            # nFC_manual is tabulated vs psi_N; map that psi_N grid to x,
-            # then interpolate onto the DOF grid in descending-x order
-            # (same order_desc convention as the "solve" branch above).
-            order_desc = np.argsort(x_dofs_si)[::-1]
-            x_desc = x_dofs_si[order_desc]
-            x_n_manual = np.interp(
-                self.psi_N_n_manual, self.psi_N_pres, self.x_init
-            )
-            nFC_on_desc = np.interp(x_desc, x_n_manual, self.nFC_manual)
-            nFC_init = np.empty_like(x_dofs_si)
-            nFC_init[order_desc] = nFC_on_desc
-
-        if nCX_ic == "solve":
-            # Initial guess for nCX from the n_CX fluid governing equation
-            # (Eq. (10) of Saarelma-Connor):
-            #
-            #   |V_CX| d/dx[ f_CX g n_CX ] = n_e (n_CX S_i - (S_CX/2) n_FC)
-            #
-            # Let u = f_CX g n_CX and tau = -x (inward distance, >= 0). Then
-            #   du/dtau = -P(tau) u + Q(tau)
-            # with
-            #   P = n_e S_i / (|V_CX| f_CX g)
-            #   Q = n_e S_CX n_FC / (2 |V_CX|)   <-- Note: f_CX is no longer here!
-            # Integrating factor nu(tau) = exp(int_0^tau P dtau') gives
-            #   u(tau) = (u(0) + int_0^tau nu Q dtau') / nu(tau)
-            # with u(0) = f_CX(0) * g(0) * nCX_x0. 
-            # Finally, n_CX = u / (f_CX g).
-
-            ne_desc_init  = ne_init[order_desc]                            # m^-3
-            g_desc        = np.interp(x_desc, self.x_init, self.gradr2_fsa)
-            Vcx_desc      = np.interp(x_desc, self.x_init, np.abs(self.V_cx_pres))  # m/s
-            
-            # (Assuming self.fCX is now an array defined on self.x_init)
-            fCX_desc      = np.interp(x_desc, self.x_init, self.fCX)       
-            tau_desc      = -x_desc                                        # >= 0, ascending from 0
-        
-            P_desc        = ne_desc_init * Si_desc / (Vcx_desc * fCX_desc * g_desc)
-            Q_desc        = ne_desc_init * Scx_desc * nFC_on_desc / (2.0 * Vcx_desc) 
-            
-            int_P         = cumulative_trapezoid(P_desc, tau_desc, initial=0.0)
-            nu_desc       = np.exp(int_P)
-            nu_Q_int      = cumulative_trapezoid(nu_desc * Q_desc, tau_desc, initial=0.0)
-            
-            u_desc_0      = fCX_desc[0] * g_desc[0] * self.nCX_x0
-            u_desc        = (u_desc_0 + nu_Q_int) / nu_desc
-
-            nCX_on_desc   = u_desc / (fCX_desc * g_desc)
-            nCX_init      = np.empty_like(x_dofs_si)
-            nCX_init[order_desc] = nCX_on_desc
-        elif nCX_ic == "scale nFC":
-            nCX_init = nFC_init * self.nCX_x0 / self.nFC_x0
-        elif nCX_ic == "manual EPEDNN loop":
-            order_desc = np.argsort(x_dofs_si)[::-1]
-            x_desc = x_dofs_si[order_desc]
-            x_n_manual = np.interp(
-                self.psi_N_n_manual, self.psi_N_pres, self.x_init
-            )
-            nCX_on_desc = np.interp(x_desc, x_n_manual, self.nCX_manual)
-            nCX_init = np.empty_like(x_dofs_si)
-            nCX_init[order_desc] = nCX_on_desc
-        else:
-            raise ValueError(f"Unknown nCX_ic={nCX_ic!r}; expected 'solve' or 'scale nFC'.")
+        # Neutral initial guesses -- built by the shared helper in
+        # src/bc_ig_helpers.py so the firedrake and scipy paths cannot
+        # drift apart (same contract as build_ne_initial_guess above).
+        nFC_init, nCX_init = bcig.build_neutral_initial_guess(
+            self, x_dofs_si, ne_init, nFC_ic=nFC_ic, nCX_ic=nCX_ic,
+        )
 
         # diagnostics
         self.nCX_init = nCX_init

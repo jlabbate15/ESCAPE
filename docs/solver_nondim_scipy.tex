@@ -1,0 +1,643 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  keywordstyle=\color{blue!60!black},
+  commentstyle=\color{green!40!black},
+  showstringspaces=false,
+  language=Python,
+  frame=single,
+  framesep=4pt,
+  rulecolor=\color{black!25},
+}
+
+\newcommand{\hn}{\hat{n}}
+\newcommand{\hx}{\hat{x}}
+\newcommand{\hg}{\hat{g}}
+\newcommand{\hS}{\hat{S}}
+\newcommand{\hV}{\hat{V}}
+\newcommand{\hD}{\hat{D}}
+\newcommand{\hT}{\hat{T}}
+\newcommand{\hf}{\hat{f}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{The \code{scipy} Collocation Solver in \code{src/solver\_nondim.py}\\
+       \large A flux-variable BVP formulation of the non-dimensional
+       Saarelma--Connor pedestal model}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\code{src/solver\_nondim.py} solves the coupled three-equation
+Saarelma--Connor pedestal model in the non-dimensional form of
+Appendix~A.8 of the writeup.  It offers two independent discretisations,
+selected by the \code{solver\_structure} keyword of
+\code{solve\_coupled\_nondim}: a Firedrake finite-element path
+(\code{"firedrake"}, the default) and a SciPy collocation path
+(\code{"scipy"}), implemented in
+\code{solve\_coupled\_nondim\_scipy}.  This note documents the SciPy
+path: the change of variables that turns the mixed second-order system
+into an explicit first-order system suitable for
+\code{scipy.integrate.solve\_bvp}, the placement of the four boundary
+conditions, the Picard loop on the frozen KBM diffusivity, and the
+construction of the initial guess.
+\end{abstract}
+
+\tableofcontents
+
+\section{Overview}
+
+The physical model is a coupled system for the electron density $n_e$ and
+two neutral populations --- Franck--Condon ($n_{\mathrm{FC}}$) and
+charge-exchange ($n_{\mathrm{CX}}$) neutrals --- on the pedestal interval
+$x \in [x_{\mathrm{inner}}, 0]$, with $x = 0$ the separatrix.  The class
+\code{saarelma\_connor\_nondim} subclasses \code{saarelma\_connor} and
+inherits all equilibrium, kinetic and cross-section setup unchanged; only
+the solve is re-implemented.
+
+The SciPy path performs the following steps.
+
+\begin{enumerate}
+  \item Build the equilibrium/kinetic coefficient grids and the ETG
+        coefficient (\code{\_ensure\_firedrake\_coefficient\_grids},
+        \code{construct\_C\_ETG}) --- pure NumPy, no Firedrake.
+  \item Resolve the boundary-condition data
+        (\code{bc\_ig\_helpers.resolve\_ne\_bcs}).
+  \item Compute the four reference scales and cache them
+        (\code{\_set\_nondim\_scales}), Sec.~\ref{sec:nondim}.
+  \item Wrap every frozen coefficient in a linear interpolant of $\hx$
+        (\code{\_scipy\_coefficients\_nondim}), Sec.~\ref{sec:coeff}.
+  \item Change variables from $(\hn_e, \hn_{\mathrm{FC}},
+        \hn_{\mathrm{CX}})$ to the flux state
+        $Y = (\hn_e, \Phi, U, W)$, Sec.~\ref{sec:flux}.
+  \item Build the electron and neutral initial guesses with the helpers
+        shared with the Firedrake path, then convert the neutrals to
+        fluxes, Sec.~\ref{sec:guess}.
+  \item Iterate \code{solve\_bvp} inside a Picard loop that refreezes the
+        KBM diffusivity, Sec.~\ref{sec:picard}.
+  \item Recover the neutral densities from the fluxes and restore SI
+        units, Sec.~\ref{sec:output}.
+\end{enumerate}
+
+\section{Non-dimensionalisation}
+\label{sec:nondim}
+
+Four free scales are chosen from separatrix values
+(\code{\_set\_nondim\_scales}):
+\begin{align}
+  L    &= |x_{\mathrm{inner}}|                &&\text{(m)},   \\
+  n_0  &= n_e(0)                              &&(\mathrm{m^{-3}}), \\
+  T_0  &= \bigl(T_e(0) + T_i(0)\bigr)\,e      &&\text{(J)},   \\
+  S_0  &= S_i(0)                              &&(\mathrm{m^3\,s^{-1}}),
+\end{align}
+with the derived scales
+\begin{equation}
+  \tau = \frac{1}{n_0 S_0}, \qquad
+  [V]_0 = \frac{L}{\tau} = L n_0 S_0, \qquad
+  [D]_0 = \frac{L^2}{\tau} = L^2 n_0 S_0, \qquad
+  [p]_0 = n_0 T_0 .
+\end{equation}
+Hatted variables are $\hx = x/L \in [-1,0]$, $\hn_e = n_e/n_0$,
+$\hn_{\mathrm{FC}} = \langle n_{\mathrm{FC}}\rangle/n_0$,
+$\hn_{\mathrm{CX}} = \langle n_{\mathrm{CX}}\rangle/n_0$,
+$\hS_i = S_i/S_0$, $\hS_{\mathrm{CX}} = S_{\mathrm{CX}}/S_0$,
+$\hV = |V|/[V]_0$, and $\hg = \langle |\nabla r|^2 \rangle$ (already
+dimensionless).  The transport coefficients scale as
+\begin{equation}
+  \hat{C}_{\mathrm{ETG}} = \frac{C_{\mathrm{ETG}}}{L^2 n_0^2 S_0},\qquad
+  \hD_{\mathrm{NEO}}     = \frac{D_{\mathrm{NEO}}}{[D]_0},\qquad
+  \hat{A}_{\mathrm{KBM}} = \frac{A_{\mathrm{KBM}}}{[D]_0},\qquad
+  \hat{B}_{\mathrm{KBM}} = \frac{B_{\mathrm{KBM}} T_0}{L^3 S_0}.
+\end{equation}
+By construction $\hn_e(0) = 1$ and $\hS_i(0) = 1$.
+
+\section{Governing equations}
+
+In strong (divergence) form the non-dimensional system is
+\begin{align}
+  \frac{d}{d\hx}\Bigl[ \hf\, \frac{d\hn_e}{d\hx} \Bigr]
+    &= -\,\hn_e\,\hS_i\,\bigl(\hn_{\mathrm{FC}} + \hn_{\mathrm{CX}}\bigr),
+    \label{eq:ne} \\[2pt]
+  \hV_{\mathrm{FC}}\,\frac{d}{d\hx}
+    \bigl[ f_{\mathrm{FC}}\,\hg\,\hn_{\mathrm{FC}} \bigr]
+    &= \hn_e\,\bigl(\hS_i + \hS_{\mathrm{CX}}\bigr)\,\hn_{\mathrm{FC}},
+    \label{eq:nfc} \\[2pt]
+  \frac{d}{d\hx}
+    \bigl[ \hV_{\mathrm{CX}}\,f_{\mathrm{CX}}\,\hg\,\hn_{\mathrm{CX}} \bigr]
+    &= \hn_e\Bigl(\hS_i\,\hn_{\mathrm{CX}}
+        - \tfrac{1}{2}\,\hS_{\mathrm{CX}}\,\hn_{\mathrm{FC}}\Bigr),
+    \label{eq:ncx}
+\end{align}
+which are the strong counterparts of the weak residuals
+\code{F1\_hat}, \code{F2\_hat}, \code{F3\_hat} in the module docstring.
+The \emph{conductance} $\hf$ collects all the diffusive channels:
+\begin{equation}
+  \hf(\hx, \hn_e)
+    = \hg\,\bigl(\hD_{\mathrm{NEO}} + \hD_{\mathrm{KBM}}\bigr)
+    + \hg\,\frac{\hat{C}_{\mathrm{ETG}}}{\hn_e}.
+  \label{eq:conductance}
+\end{equation}
+The $\hat{C}_{\mathrm{ETG}}/\hn_e$ term makes $\hf$ density-dependent;
+this is the only nonlinearity in the $\hn_e$ flux, because the SciPy
+path runs with $\hat{B}_{\mathrm{KBM}} = 0$
+(Sec.~\ref{sec:picard}), so no $(\hn_e')^2$ term survives.
+
+Equations \eqref{eq:ne}--\eqref{eq:ncx} are second order in $\hn_e$ and
+first order in each neutral: a fourth-order system requiring four
+boundary conditions, exactly as in Saarelma et al.~(2023), Sec.~2.3.
+
+\section{The flux change of variables}
+\label{sec:flux}
+
+\code{solve\_bvp} requires an explicit first-order system
+$\mathbf{y}' = \mathbf{F}(\hx, \mathbf{y})$.  The naive reduction
+$y = (\hn_e, \hn_e', \dots)$ would require expanding
+$d/d\hx[\hf \hn_e']= \hf \hn_e'' + \hf' \hn_e'$, i.e.\ a coefficient
+derivative $d\hf/d\hx$ evaluated off the coarse p-file grid --- the
+accuracy-limiting step noted in \code{solver\_sc}'s module docstring.
+The SciPy path avoids it entirely by carrying the three \emph{fluxes} as
+state variables:
+\begin{equation}
+  Y = \bigl[\, \hn_e,\ \Phi,\ U,\ W \,\bigr],
+  \qquad
+  \begin{aligned}
+    \Phi &= \hf\,\frac{d\hn_e}{d\hx}
+          &&\text{(electron flux)},\\
+    U    &= f_{\mathrm{FC}}\,\hg\,\hn_{\mathrm{FC}}
+          &&\text{(FC flux}/\hV_{\mathrm{FC}}\text{)},\\
+    W    &= \hV_{\mathrm{CX}}\,f_{\mathrm{CX}}\,\hg\,\hn_{\mathrm{CX}}
+          &&\text{(CX flux)}.
+  \end{aligned}
+\end{equation}
+Substituting into \eqref{eq:ne}--\eqref{eq:ncx} and using the inverse
+relations
+\begin{equation}
+  \hn_{\mathrm{FC}} = \frac{U}{f_{\mathrm{FC}}\,\hg},
+  \qquad
+  \hn_{\mathrm{CX}} = \frac{W}{\hV_{\mathrm{CX}}\,f_{\mathrm{CX}}\,\hg},
+  \label{eq:recover}
+\end{equation}
+gives the first-order system integrated by the solver:
+\begin{equation}
+\left\{
+\begin{aligned}
+  \frac{d\hn_e}{d\hx} &= \frac{\Phi}{\hf(\hx,\hn_e)},
+    \\
+  \frac{d\Phi}{d\hx}  &= -\,\hn_e\,\hS_i\,
+    \bigl(\hn_{\mathrm{FC}} + \hn_{\mathrm{CX}}\bigr),
+    \\
+  \frac{dU}{d\hx}     &= \frac{\hn_e\,
+    \bigl(\hS_i + \hS_{\mathrm{CX}}\bigr)\,\hn_{\mathrm{FC}}}
+    {\hV_{\mathrm{FC}}},
+    \\
+  \frac{dW}{d\hx}     &= \hn_e\Bigl(\hS_i\,\hn_{\mathrm{CX}}
+    - \tfrac{1}{2}\,\hS_{\mathrm{CX}}\,\hn_{\mathrm{FC}}\Bigr).
+    
+\end{aligned}
+\right.
+\label{eq:odesys}
+\end{equation}
+\textbf{No coefficient derivative appears anywhere.}  Every coefficient
+enters algebraically, so the divergence form of the equations is kept
+intact --- the same property the Firedrake weak form enjoys.  This is the
+central design point of the SciPy path.
+
+In the code this is the closure \code{ode(xq, Y)}, which returns
+the four right-hand sides of \eqref{eq:odesys} stacked with \code{np.vstack}.  Note
+that \code{ode} is written to be vectorised over the collocation nodes
+\code{xq}, as \code{solve\_bvp} requires.
+
+\section{Frozen coefficients}
+\label{sec:coeff}
+
+All frozen coefficients live on the SI grid \code{self.x\_init}.
+\code{\_scipy\_coefficients\_nondim} returns a dictionary of callables of
+$\hx$, each of which internally applies $x = L\hx$ and multiplies by the
+appropriate inverse scale:
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Key & Symbol & Source array & Scaling \\
+\midrule
+\code{g}      & $\hg$                      & \code{gradr2\_fsa}       & $1$ (dimensionless) \\
+\code{Si}     & $\hS_i$                    & \code{S\_i\_pres}        & $1/S_0$ \\
+\code{Scx}    & $\hS_{\mathrm{CX}}$        & \code{S\_cx\_pres}       & $1/S_0$ \\
+\code{Vcx}    & $\hV_{\mathrm{CX}}$        & $|$\code{V\_cx\_pres}$|$ & $1/[V]_0$ \\
+\code{fFC}    & $f_{\mathrm{FC}}$          & \code{fFC}               & $1$ \\
+\code{fCX}    & $f_{\mathrm{CX}}$          & \code{fCX}               & $1$ \\
+\code{D\_NEO} & $\hD_{\mathrm{NEO}}$       & \code{D\_NEO}            & $1/[D]_0$ \\
+\code{C\_ETG} & $\hat{C}_{\mathrm{ETG}}$   & \code{C\_ETG}            & $1/(L^2 n_0^2 S_0)$ \\
+\code{VFC}    & $\hV_{\mathrm{FC}}$        & $|$\code{V\_FC}$|$ (scalar) & $1/[V]_0$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Interpolation is \emph{linear} with linear extrapolation
+(\code{interp1d(..., kind='linear', fill\_value='extrapolate')}),
+deliberately matching the \code{np.interp} sampling the Firedrake path
+uses to fill its coefficient \code{Function}s.  Both discretisations
+therefore see the identical coefficient reconstruction, which makes a
+solver-to-solver comparison meaningful.
+
+The KBM diffusivity $\hD_{\mathrm{KBM}}$ is \emph{not} in this
+dictionary: it is refrozen every Picard iteration and enters through a
+separate interpolant \code{D\_KBM\_x} rebuilt inside the loop.
+
+\section{Boundary conditions}
+\label{sec:bcs}
+
+Four residuals are required.  Three are always the same Dirichlet
+conditions at the separatrix $\hx = 0$, expressed in flux variables via
+\eqref{eq:recover}:
+\begin{align}
+  \hn_e(0) &= \hn_e^{(0)} \;=\; n_e(0)/n_0 \;=\; 1, \\
+  U(0)     &= U_0 \;=\; \hn_{\mathrm{FC}}^{(0)}\,
+                 f_{\mathrm{FC}}(0)\,\hg(0), \\
+  W(0)     &= W_0 \;=\; \hn_{\mathrm{CX}}^{(0)}\,
+                 \hV_{\mathrm{CX}}(0)\,f_{\mathrm{CX}}(0)\,\hg(0).
+\end{align}
+The fourth is the prescribed density gradient, converted to a flux
+condition through $\Phi = \hf\,\hn_e'$.  Its placement is controlled by
+\code{ne\_grad\_bc\_loc}:
+\begin{itemize}
+  \item \code{"inner"} (default): imposed at $\hx = -1$,
+        \[
+          \Phi(-1) = \hf\bigl(-1,\ \hn_e(-1)\bigr)\;
+          \widehat{\left.\frac{dn_e}{dx}\right|}_{\mathrm{inner}} ,
+        \]
+        one condition at each end of the domain;
+  \item \code{"outer"}: imposed at $\hx = 0$ alongside the Dirichlet
+        value, $\Phi(0) = \hf(0, \hn_e(0))\,\widehat{dn_e/dx}|_{0}$,
+        leaving the inner boundary completely free.  This is the
+        boundary-condition set of Saarelma et al.~(2023), Sec.~2.3.
+\end{itemize}
+The dimensionless gradient is $\widehat{dn_e/dx} = L\,(dn_e/dx)/n_0$
+(\code{hat\_dne\_dx\_bc}).
+
+\paragraph{Why the SciPy path needs no shooting.}
+This is the practical advantage of collocation here.  In the Galerkin
+discretisation, a strong Dirichlet condition at $\hx = 0$ forces
+$v_e(0) = 0$, so a boundary flux term at the separatrix vanishes
+identically and both conditions cannot be imposed directly; the Firedrake
+path therefore recasts the inner flux as an unknown Lagrange multiplier
+and runs a secant iteration on it (\code{\_shoot\_outer\_grad\_nondim}).
+\code{solve\_bvp} only cares about the correct \emph{number} of residuals
+and is indifferent to which end each is evaluated at, so
+\code{ne\_grad\_bc\_loc="outer"} costs nothing extra --- it is one line in
+the \code{bc(Ya, Yb)} closure.  In that closure \code{Ya} is the state at
+$\hx=-1$ and \code{Yb} the state at $\hx=0$.
+
+\section{Initial guess and neutral seeds}
+\label{sec:guess}
+
+The collocation grid is uniform and ascending,
+$\hx \in \{-1, \dots, 0\}$ with \code{x\_res} points.  Both the density
+and the neutral guesses come from the shared helpers in
+\code{src/bc\_ig\_helpers.py}, which are the \emph{same} routines the
+Firedrake path calls, on the same SI grid.  That is deliberate: the
+module docstring of \code{bc\_ig\_helpers} states that every solver in
+the repository resolves its boundary conditions and builds its initial
+guesses there so the discretisations cannot drift apart.  The two
+paths therefore start from identical SI profiles and accept identical
+options.
+
+\subsection{Electron density}
+
+\code{build\_ne\_initial\_guess(model, x\_grid, initial\_guess, bcs,
+tanh\_width, tanh\_center)} returns $n_e^{\mathrm{init}}$ in SI on the
+requested grid, with \code{initial\_guess} one of \code{"linear"},
+\code{"pfile"}, \code{"tanh"} or \code{"manual EPEDNN loop"}.  Every
+shape is anchored on the resolved boundary conditions: it meets
+\code{bcs.ne\_outer} at the separatrix and rises to
+\code{bcs.ne\_inner\_guess} at the pedestal top.  The scipy path then
+normalises and floors it,
+\begin{equation}
+  N_g = \max\bigl(n_e^{\mathrm{init}}/n_0,\ \varepsilon\bigr),
+  \qquad \varepsilon = \code{ne\_floor}\ (\text{default } 10^{-8}),
+\end{equation}
+the floor guarding the $\hat{C}_{\mathrm{ETG}}/\hn_e$ division.
+
+\subsection{Neutrals}
+\label{sec:neutralguess}
+
+\code{build\_neutral\_initial\_guess(model, x\_grid, ne\_init, nFC\_ic,
+nCX\_ic)} returns the pair $(n_{\mathrm{FC}}^{\mathrm{init}},
+n_{\mathrm{CX}}^{\mathrm{init}})$ in SI.  All work is done on the grid
+sorted in \emph{descending} $x$ --- integrating inward from the
+separatrix, the end that carries the Dirichlet data
+$n_{\mathrm{FC}}(0) = $ \code{nFC\_x0} and $n_{\mathrm{CX}}(0) = $
+\code{nCX\_x0} --- and the results are scattered back into the caller's
+ordering, so an unsorted \code{x\_grid} is handled correctly.
+
+\paragraph{\code{nFC\_ic="solve"}.}
+At frozen $n_e$, Eq.~(14) of Saarelma et al.~(2023),
+\begin{equation}
+  |V_{\mathrm{FC}}|\,\frac{d}{dx}
+    \bigl[f_{\mathrm{FC}}\,n_{\mathrm{FC}}\bigr]
+  = n_e\,\bigl(S_i + S_{\mathrm{CX}}\bigr)\,n_{\mathrm{FC}},
+\end{equation}
+is exactly linear and homogeneous, so an integrating factor anchored at
+the separatrix gives it in closed form:
+\begin{equation}
+  n_{\mathrm{FC}}(x) = n_{\mathrm{FC}}(0)\,
+    \exp\!\left[\int_0^{x}
+      \frac{n_e\,(S_i + S_{\mathrm{CX}})}
+           {f_{\mathrm{FC}}\,|V_{\mathrm{FC}}|}\,dx'\right].
+  \label{eq:fcguess}
+\end{equation}
+The integral is evaluated with \code{cumulative\_trapezoid} over the
+descending grid, so $dx < 0$ and the guess decays inward --- the
+boundary-layer behaviour the collocation mesh has to resolve.  A
+negative result raises \code{ValueError}.
+
+\paragraph{\code{nCX\_ic="solve"}.}
+The CX equation, Eq.~(10),
+\begin{equation}
+  |V_{\mathrm{CX}}|\,\frac{d}{dx}
+    \bigl[f_{\mathrm{CX}}\,g\,n_{\mathrm{CX}}\bigr]
+  = n_e\Bigl(S_i\,n_{\mathrm{CX}}
+      - \tfrac{1}{2}S_{\mathrm{CX}}\,n_{\mathrm{FC}}\Bigr),
+\end{equation}
+is linear but \emph{inhomogeneous}: it is driven by the FC guess just
+built.  With $u = f_{\mathrm{CX}}\,g\,n_{\mathrm{CX}}$ and the inward
+coordinate $\tau = -x \ge 0$,
+\begin{equation}
+  \frac{du}{d\tau} = -P(\tau)\,u + Q(\tau),
+  \qquad
+  P = \frac{n_e S_i}{|V_{\mathrm{CX}}|\,f_{\mathrm{CX}}\,g},
+  \qquad
+  Q = \frac{n_e\,S_{\mathrm{CX}}\,n_{\mathrm{FC}}}{2\,|V_{\mathrm{CX}}|},
+\end{equation}
+noting that $f_{\mathrm{CX}}$ does \emph{not} appear in $Q$.  The
+integrating factor $\nu(\tau) = \exp\!\int_0^\tau P\,d\tau'$ gives
+\begin{equation}
+  u(\tau) = \frac{u(0) + \int_0^\tau \nu\,Q\,d\tau'}{\nu(\tau)},
+  \qquad
+  u(0) = f_{\mathrm{CX}}(0)\,g(0)\,n_{\mathrm{CX}}(0),
+  \qquad
+  n_{\mathrm{CX}} = \frac{u}{f_{\mathrm{CX}}\,g}.
+  \label{eq:cxguess}
+\end{equation}
+Keeping the $Q$ term matters: the CX population in this model is
+\emph{fed} by charge exchange on the FC neutrals, so a purely
+homogeneous seed misses its source entirely.
+
+\paragraph{Manual and scaled options.}
+\code{nFC\_ic="manual EPEDNN loop"} and
+\code{nCX\_ic="manual EPEDNN loop"} interpolate the tabulated profiles
+\code{model.nFC\_manual} / \code{model.nCX\_manual}, which are given on
+\code{model.psi\_N\_n\_manual}, onto $x$ via the
+$\psi_N \mapsto x$ map \code{model.psi\_N\_pres} $\to$
+\code{model.x\_init}.  These are the profiles handed back by an outer
+EPED-NN iteration, so a coupled solve can be restarted from the
+previous outer step rather than from an analytic guess.
+\code{nCX\_ic="scale nFC"} simply takes
+$n_{\mathrm{CX}}^{\mathrm{init}} = n_{\mathrm{FC}}^{\mathrm{init}}\,
+n_{\mathrm{CX}}(0)/n_{\mathrm{FC}}(0)$.
+The two choices are independent: any \code{nFC\_ic} may be combined with
+any \code{nCX\_ic}, including a manual FC guess driving a solved CX
+guess through $Q$ in \eqref{eq:cxguess}.
+
+\subsection{Conversion to the flux state}
+
+The helper returns SI \emph{densities}, but the collocation system
+carries fluxes, so the seeds are converted through \eqref{eq:recover}:
+\begin{equation}
+  U_g = \frac{n_{\mathrm{FC}}^{\mathrm{init}}}{n_0}\,
+        f_{\mathrm{FC}}\,\hg,
+  \qquad
+  W_g = \frac{n_{\mathrm{CX}}^{\mathrm{init}}}{n_0}\,
+        \hV_{\mathrm{CX}}\,f_{\mathrm{CX}}\,\hg,
+  \qquad
+  \Phi_g = \hf(\hx, N_g)\,\nabla N_g,
+\end{equation}
+the last with \code{np.gradient}.  Stacking gives the
+$4 \times$\code{x\_res} array \code{Y\_guess} that seeds the first
+\code{solve\_bvp} call.
+
+\section{The Picard loop on the KBM diffusivity}
+\label{sec:picard}
+
+The KBM contribution is handled by outer (Picard) iteration rather than
+being folded into the Newton solve, following Saarelma et
+al.~(2023) Eqs.~(24)--(25).  Only \code{picard\_gate\_mode="average"} is
+supported here.  In that mode
+\code{calc\_pressure\_quantities\_nondim} computes the Connor--Hastie
+$\alpha$ in SI units from the current density,
+\begin{equation}
+  p = n_e\,(T_e + T_i)\,e, \qquad
+  \alpha = \alpha_{\mathrm{nodp}}\,\frac{dp}{dx},
+\end{equation}
+gates on the pedestal-averaged value, and returns a single whole-grid
+diffusivity
+\begin{equation}
+  D_{\mathrm{KBM}} =
+  \begin{cases}
+    (\bar{\alpha} - \alpha_{\mathrm{crit}})\,G_{\mathrm{KBM}},
+      & \bar{\alpha} > \alpha_{\mathrm{crit}},\\
+    0, & \text{otherwise},
+  \end{cases}
+  \qquad
+  \hD_{\mathrm{KBM}} = D_{\mathrm{KBM}}/[D]_0 ,
+\end{equation}
+with $G_{\mathrm{KBM}} = C_{\mathrm{KBM}} c_s \rho_s^2 / a$.  Because the
+whole frozen diffusivity sits in the $D$-slot with
+$\hat{B}_{\mathrm{KBM}} = 0$, the conductance
+\eqref{eq:conductance} depends on $\hx$ and $\hn_e$ only --- never on
+$\hn_e'$ --- which is precisely what makes the inversion
+$\Phi \mapsto \hn_e' = \Phi/\hf$ in the first line of \eqref{eq:odesys} explicit.
+
+\paragraph{Why \code{"majority"} is rejected.}
+The \code{"majority"} gate freezes the local $(A,B)$ KBM structure at
+every point, which reintroduces a $\hat{B}_{\mathrm{KBM}}$ term
+proportional to $(\hn_e')^2$.  The conductance would then depend on
+$\hn_e'$, and recovering $\hn_e'$ from $\Phi$ would become a per-point
+root-find inside the ODE right-hand side.  That is not implemented; the
+code raises \code{NotImplementedError} and directs the user to
+\code{solver\_structure="firedrake"}.
+
+\paragraph{Loop structure.}
+Each iteration:
+\begin{enumerate}
+  \item rebuild the interpolant \code{D\_KBM\_x} from the current
+        $\hD_{\mathrm{KBM}}$;
+  \item interpolate the previous solution onto the base grid as the
+        starting guess (\code{solve\_bvp} adapts its own mesh, so
+        \code{sol.x} generally differs from \code{hat\_x});
+  \item call \code{solve\_bvp(ode, bc, hat\_x, Y\_start, tol=bvp\_tol,
+        max\_nodes=bvp\_max\_nodes)}; a failure raises immediately;
+  \item measure the relative density change
+        $\delta = \|N^{\mathrm{new}} - N^{\mathrm{old}}\|_\infty /
+        \|N^{\mathrm{new}}\|_\infty$;
+  \item refreeze $\hD_{\mathrm{KBM}}$ from the new profile, with optional
+        under-relaxation
+        \[
+          \hD_{\mathrm{KBM}}^{\,\mathrm{new}}
+            = \omega\,\hD_{\mathrm{KBM}}^{\,\ast}
+            + (1-\omega)\,\hD_{\mathrm{KBM}}^{\,\mathrm{old}},
+          \qquad \omega = \code{picard\_relax} \in (0,1];
+        \]
+  \item append a history record and test convergence.
+\end{enumerate}
+Convergence requires \emph{both} $\delta < $ \code{picard\_rtol}
+\emph{and} an unchanged gate state between successive iterations.  The
+second condition matters: the gate is a discontinuous function of
+$\bar\alpha$, so a run can otherwise oscillate between a KBM-on and a
+KBM-off branch with a small $\delta$ on each.  Failure to converge within
+\code{picard\_max\_it} raises a \code{RuntimeError} suggesting a larger
+iteration budget or $\omega < 1$.  Diagnostics land in
+\code{self.picard\_info} and \code{self.kbm\_info}.
+
+\section{Recovery and output}
+\label{sec:output}
+
+On the converged adaptive mesh \code{sol.x}, the neutral densities are
+recovered algebraically from \eqref{eq:recover} and everything is
+rescaled to SI:
+\begin{equation}
+  x = L\,\hx, \qquad
+  n_e = n_0\,\hn_e, \qquad
+  n_{\mathrm{FC}} = n_0\,\hn_{\mathrm{FC}}, \qquad
+  n_{\mathrm{CX}} = n_0\,\hn_{\mathrm{CX}}, \qquad
+  \frac{dn_e}{dx} = \frac{n_0}{L}\,\frac{\Phi}{\hf}.
+\end{equation}
+The results are stored on the same attributes the parent solver uses
+(\code{x\_sol}, \code{ne\_sol}, \code{nFC\_sol}, \code{nCX\_sol},
+\code{dne\_dx\_sol}), so downstream plotting and EPED feeds are
+unaffected; the dimensionless profiles are kept alongside as
+\code{hat\_x\_sol}, \code{hat\_ne\_sol}, \code{hat\_nFC\_sol},
+\code{hat\_nCX\_sol}, and the raw \code{solve\_bvp} object as
+\code{self.sol}.  The return value is the tuple
+\code{(x\_sol, ne\_sol, nFC\_sol, nCX\_sol, T\_e\_pres, psi\_N\_pres)},
+identical to the Firedrake path's.
+
+\section{Algorithm summary}
+
+\begin{lstlisting}[language=Python, caption={Structure of
+\code{solve\_coupled\_nondim\_scipy}.}]
+# --- setup -----------------------------------------------------------
+validate(picard_gate_mode == "average", picard_relax in (0, 1])
+_ensure_firedrake_coefficient_grids(x_res);  construct_C_ETG()
+nebcs = resolve_ne_bcs(...)          # ne(0), dne/dx at the chosen end
+_set_nondim_scales()                 # L, n0, T0, S0 -> tau, [V]0, [D]0
+hat_x = linspace(-1, 0, x_res)
+c     = _scipy_coefficients_nondim() # callables of hat_x
+
+# --- initial guess (shared helpers: src/bc_ig_helpers.py) ------------
+ne_init   = build_ne_initial_guess(self, x_si, initial_guess, nebcs, ...)
+N_g       = clip(ne_init / n0, ne_floor, None)
+hat_D_KBM = calc_pressure_quantities_nondim(N_g, "average", hat_x)
+nFC_init, nCX_init = build_neutral_initial_guess(self, x_si, ne_init,
+                                                 nFC_ic, nCX_ic)
+U_g       = (nFC_init / n0) * fFC * g          # SI densities -> fluxes
+W_g       = (nCX_init / n0) * Vcx * fCX * g
+Phi_g     = conductance(hat_x, N_g, hat_D_KBM) * gradient(N_g, hat_x)
+Y_prev    = vstack([N_g, Phi_g, U_g, W_g])
+
+# --- Picard loop on the frozen KBM diffusivity -----------------------
+for it in 1 .. picard_max_it:
+    D_KBM_x = interp1d(hat_x, hat_D_KBM)      # enters ode() and bc()
+    Y_start = interp(hat_x, x_prev, Y_prev)   # sol.x is adaptive
+    sol     = solve_bvp(ode, bc, hat_x, Y_start,
+                        tol=bvp_tol, max_nodes=bvp_max_nodes)
+    raise if not sol.success
+    dn_rel  = relative_change(sol.y[0], Y_prev[0])
+    hat_D_KBM = relax(calc_pressure_quantities_nondim(sol.y[0], ...))
+    if dn_rel < picard_rtol and gate_unchanged: converged; break
+
+# --- recover and rescale ---------------------------------------------
+nFC = U / (fFC * g);   nCX = W / (Vcx * fCX * g)
+x_sol, ne_sol, ... = L * hat_x_sol, n0 * N_sol, ...
+\end{lstlisting}
+
+\section{Comparison with the Firedrake path}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.24\textwidth}p{0.34\textwidth}p{0.34\textwidth}@{}}
+\toprule
+& \code{solver\_structure="firedrake"} & \code{solver\_structure="scipy"} \\
+\midrule
+Discretisation & CG$_p$ finite elements on a mixed space, Newton on the
+weak residuals & Collocation (\code{solve\_bvp}) on an adaptive mesh \\
+Unknowns & $(\hn_e, \hn_{\mathrm{FC}}, \hn_{\mathrm{CX}})$ &
+$(\hn_e, \Phi, U, W)$ --- fluxes \\
+Coefficient derivatives & none (weak form) & none (divergence form kept) \\
+Mesh & fixed, \code{x\_res} cells & adaptive, up to \code{bvp\_max\_nodes} \\
+Error control & mesh resolution & \code{bvp\_tol} residual tolerance \\
+\code{ne\_grad\_bc\_loc="outer"} & secant shooting on the inner flux &
+one extra residual, no shooting \\
+KBM \code{"average"} & supported & supported \\
+KBM \code{"majority"} / inline gate & supported & \code{NotImplementedError} \\
+n$_e$ initial guess & \multicolumn{2}{l}{shared
+\code{build\_ne\_initial\_guess}} \\
+Neutral initial guess & \multicolumn{2}{l}{shared
+\code{build\_neutral\_initial\_guess} (\code{nFC\_ic}, \code{nCX\_ic})} \\
+Analytic neutral option & \code{neutral\_treatment="analytic"} available &
+not applicable (neutrals solved with the system) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Practical notes}
+
+\begin{itemize}
+  \item \textbf{Entry point.}  Reach the SciPy path through
+        \code{solve\_coupled\_nondim(solver\_structure="scipy", ...)}, or
+        call \code{solve\_coupled\_nondim\_scipy} directly.  Note that
+        \code{solve\_coupled\_nondim} checks
+        \code{\_FIREDRAKE\_AVAILABLE} \emph{before} dispatching, so
+        reaching the SciPy path through the driver still requires
+        Firedrake to be importable even though the path itself never uses
+        it; calling \code{solve\_coupled\_nondim\_scipy} directly does
+        not.
+  \item \textbf{\code{x\_res}} only sets the \emph{initial} collocation
+        grid.  \code{solve\_bvp} refines adaptively until the residual
+        meets \code{bvp\_tol}, so the returned \code{sol.x} is generally
+        finer and non-uniform.  The default \code{x\_res=200} for the
+        SciPy path is much larger than the Firedrake default
+        \code{x\_res=20} because the initial mesh must at least see the
+        neutral boundary layer.
+  \item \textbf{\code{ne\_floor}} appears in three places: the initial
+        guess, the $\hat{C}_{\mathrm{ETG}}/\hn_e$ division inside
+        \code{ode}, and the conductance evaluations inside \code{bc}.  It
+        is a division guard, not a physical positivity constraint ---
+        nothing prevents \code{solve\_bvp} from returning a slightly
+        negative $\hn_e$ if the problem is under-resolved.
+  \item \textbf{Overflow in \code{nCX\_ic="solve"}.}  The integrating
+        factor $\nu = \exp\!\int_0^\tau P\,d\tau'$ in \eqref{eq:cxguess}
+        \emph{grows} inward and is not clipped, so on a strongly
+        neutral-opaque case both $\nu$ and $\int \nu Q$ can overflow to
+        \code{inf} and their ratio return \code{nan}.  The FC guess
+        \eqref{eq:fcguess} has the opposite sign and merely underflows
+        to zero, harmlessly.  This is a property of the shared helper
+        and so affects both discretisations equally; the mathematically
+        equivalent but numerically stable rearrangement is
+        $u(\tau) = u_0 e^{-I(\tau)}
+         + \int_0^\tau e^{-(I(\tau) - I(s))} Q(s)\,ds$
+        with $I(\tau) = \int_0^\tau P$.  If a solve returns \code{nan}
+        neutrals, this is the first place to look.
+  \item \textbf{Failure modes.}  A \code{solve\_bvp} failure raises
+        immediately with \code{sol.message}; the usual causes are too
+        coarse an initial mesh, a badly scaled initial guess, or a
+        \code{max\_nodes} budget exhausted by an unresolved neutral
+        layer.  Increasing \code{x\_res} or loosening \code{bvp\_tol} is
+        the first thing to try.
+\end{itemize}
+
+\end{document}
