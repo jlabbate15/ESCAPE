@@ -48,6 +48,37 @@ The dimensionless residuals (Eqs. (eq:weak-hat-A8),
               - hat_n_e * (hat_S_i * hat_n_CX - 0.5 * hat_S_CX * hat_n_FC)
               ] v_C dxhat = 0
 
+Placement of the n_e gradient boundary condition
+================================================
+``ne_grad_bc_loc`` selects which end of the domain carries the
+prescribed dn_e/dx.
+
+``"inner"`` (default, unchanged behaviour)
+    Dirichlet n_e(0) = ne_x0 at the separatrix, and at hat_x = -1
+    either Dirichlet n_e(x_inner) or the Neumann flux above
+    (``ne_inner_bc``).  One condition at each end.
+
+``"outer"``
+    Both conditions sit at the separatrix -- Dirichlet n_e(0) = ne_x0
+    *and* Neumann dn_e/dx|_{x=0} = dne_dx_outer -- and the inner
+    boundary is left completely free.  This is the boundary-condition
+    set of Saarelma et al. 2023 Sec. 2.3, where the separatrix density
+    and its gradient (their Eq. (20), dn_e/dx|_0 = -n_e(0) /
+    sqrt(D_SOL tau_par)) are the specified data and nothing is imposed
+    at the pedestal top.
+
+    A Galerkin discretisation cannot impose both directly: the strong
+    Dirichlet condition at boundary id 2 makes v_e(0) = 0, so a ds(2)
+    flux term vanishes identically.  The equivalent well-posed
+    statement is that the *inner* flux is an unknown Lagrange
+    multiplier fixed by the separatrix-gradient constraint, and that is
+    what is solved here -- by secant iteration on the ds(1) slope
+    ``hat_dne_dx_inner`` until hat_n_e'(0) matches the prescribed
+    value.  Shooting on that one scalar (rather than enlarging the
+    mixed space by a real-space multiplier) leaves the function space,
+    the Picard loop and the analytic-neutral path untouched.
+    Diagnostics land in ``self.grad_bc_info``.
+
 Solver entry point: ``saarelma_connor_nondim.solve_coupled(...)`` --
 identical signature to the parent class's :meth:`solve_coupled`.
 
@@ -56,6 +87,8 @@ equilibrium / kinetic / cross-section setup is inherited unchanged.
 ``src/solver.py`` is left untouched.
 """
 
+import warnings
+
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
 
@@ -63,7 +96,7 @@ try:
     from firedrake import (
         IntervalMesh, FunctionSpace, MixedFunctionSpace, Function,
         TestFunctions, Constant, DirichletBC,
-        dx, ds, split, solve, SpatialCoordinate,
+        dx, ds, split, solve, assemble, SpatialCoordinate,
         tanh as fd_tanh,
     )
     _FIREDRAKE_AVAILABLE = True
@@ -664,6 +697,187 @@ class saarelma_connor_nondim(saarelma_connor):
         return (flux_CX - rhs) * v_C * dx
 
     # ------------------------------------------------------------------
+    # Separatrix-gradient boundary condition (ne_grad_bc_loc="outer")
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_ne_grad_bc_loc(ne_grad_bc_loc):
+        """Validate and normalise the gradient-BC placement flag."""
+        loc = str(ne_grad_bc_loc).lower()
+        if loc not in ("inner", "outer"):
+            raise ValueError(
+                f"ne_grad_bc_loc must be 'inner' or 'outer', got "
+                f"{ne_grad_bc_loc!r}."
+            )
+        return loc
+
+    def _outer_slope_value_nondim(self, bc_origin, dne_dx_outer):
+        """SI separatrix slope dn_e/dx|_{x=0} (m^-4) for the "outer" mode.
+
+        Drawn from the same sources as the inner-boundary slope: an
+        explicit user value if one is given, otherwise the p-file
+        density gradient -- here evaluated at x = 0 rather than at
+        x_inner.  Passing the value explicitly is how the Saarelma
+        Eq. (20) SOL closure (dn_e/dx|_0 = -n_e(0)/sqrt(D_SOL tau_par))
+        is fed to the solver.
+
+        Also stored as ``self.dne_dx_outer``.
+        """
+        if dne_dx_outer is not None:
+            val = float(dne_dx_outer)
+        elif str(bc_origin).lower() in (
+            "p-file", "p-file user combo", "manual epednn loop",
+        ):
+            dne_dx_pres = np.gradient(self.n_e_pres, self.x_init)
+            val = float(np.interp(0.0, self.x_init, dne_dx_pres))
+        else:
+            raise ValueError(
+                f"bc_origin={bc_origin!r} with ne_grad_bc_loc='outer' "
+                "requires dne_dx_outer to be given."
+            )
+        self.dne_dx_outer = val
+        return val
+
+    def _shoot_outer_grad_nondim(
+        self, F, u, bcs, snes_params,
+        hat_ne_curr, hat_slope_c, hat_target, tol, max_it, verbose,
+    ):
+        """Solve ``F == 0`` subject to hat_n_e'(0) == ``hat_target``.
+
+        The inner boundary carries no condition of its own in this mode,
+        so its flux slope ``hat_slope_c`` (the ds(1) Constant, which the
+        inline-KBM boundary terms share) is the free unknown.  A damped
+        secant iteration drives the residual
+
+            r(s) = hat_n_e'(0; s) - hat_target
+
+        to zero.  The seed is the inner slope, which can be far from the
+        answer (the free flux routinely lands on the other side of zero)
+        and the system need not be solvable for every slope in between,
+        so each step is capped at four times the previous accepted one
+        and backtracked, halving, whenever SNES fails.
+
+        Every attempt restarts from the *same* reference state (the
+        iterate this routine was handed) rather than from the previous
+        attempt's answer.  That is deliberate.  Chaining warm starts
+        makes r(s) path dependent, and once two slopes are close the warm
+        start already passes SNES's convergence test, so it returns at
+        iteration zero with the density untouched and the secant sees a
+        bit-identical residual for two different slopes and concludes the
+        gradient does not respond at all.  Restarting from a fixed
+        reference makes r(s) a genuine function of s, which is what the
+        secant needs; the cost is a few more Newton steps per attempt.
+
+        Returns a diagnostics dict (also stored by the caller in
+        ``self.grad_bc_info``).
+        """
+        # ds(2) has unit measure in 1D, so this assembles to hat_n_e'(0).
+        grad_sep_form = hat_ne_curr.dx(0) * ds(2)
+        scale = max(abs(hat_target), 1e-30)   # tol is relative to target
+        history = []
+        n_solves = 0
+        n_backtracks = 0
+
+        # Fixed restart state, and SNES settings that stop it exiting on
+        # the step-size test before it has done any work.
+        ref = u.copy(deepcopy=True)
+        shoot_params = dict(snes_params)
+        shoot_params["snes_stol"] = 0.0
+
+        def _attempt(s):
+            """Solve at slope ``s`` from the reference; return (r, ok)."""
+            nonlocal n_solves
+            u.assign(ref)
+            hat_slope_c.assign(s)
+            n_solves += 1
+            try:
+                solve(F == 0, u, bcs=bcs, solver_parameters=shoot_params)
+            except Exception:
+                u.assign(ref)         # discard the failed line search
+                return None, False
+            return float(assemble(grad_sep_form)) - hat_target, True
+
+        s = float(hat_slope_c)
+        r, ok = _attempt(s)
+        if not ok:
+            raise RuntimeError(
+                f"[grad-bc] the nonlinear solve failed at the seed slope "
+                f"hat_dne/dxhat(-1) = {s:.3e}; the separatrix-gradient mode "
+                "has nothing to iterate from.  Try a different "
+                "initial_guess or dne_dx_inner (which seeds the search)."
+            )
+
+        s_prev = r_prev = None
+        step_prev = None
+        converged = False
+        for it in range(1, int(max_it) + 1):
+            history.append({"iteration": it, "hat_slope": s, "residual": r})
+            if verbose:
+                print(f"[grad-bc] it {it:3d}: hat_dne/dxhat(-1) = {s:.6e}, "
+                      f"hat_dne/dxhat(0) - target = {r:.3e}")
+            if abs(r) <= tol * scale:
+                converged = True
+                break
+
+            if s_prev is None:
+                # Bootstrap the secant with a finite-difference step.
+                step = 0.05 * abs(s) if s != 0.0 else 1e-3
+            else:
+                denom = r - r_prev
+                if denom == 0.0:
+                    raise RuntimeError(
+                        "[grad-bc] secant iteration stalled: the separatrix "
+                        "gradient did not respond to a change in the inner "
+                        "flux.  Check that ne_inner_bc='neumann' (no "
+                        "Dirichlet condition may be imposed at the inner "
+                        "boundary in ne_grad_bc_loc='outer' mode)."
+                    )
+                step = -r * (s - s_prev) / denom
+                if step_prev is not None and abs(step) > 4.0 * abs(step_prev):
+                    step = np.sign(step) * 4.0 * abs(step_prev)
+
+            # Backtrack while SNES fails.
+            ok = False
+            for _ in range(12):
+                r_new, ok = _attempt(s + step)
+                if ok:
+                    break
+                n_backtracks += 1
+                step *= 0.5
+            if not ok:
+                raise RuntimeError(
+                    "[grad-bc] the nonlinear solve kept failing while "
+                    f"searching for the separatrix gradient (last good slope "
+                    f"hat_dne/dxhat(-1) = {s:.3e}, residual {r:.3e}).  The "
+                    "system may have no solution near the slope this "
+                    "condition demands; try kbm_treatment='picard' with "
+                    "picard_relax < 1 or a coarser grad_bc_tol."
+                )
+
+            s_prev, r_prev = s, r
+            s, r = s + step, r_new
+            step_prev = step
+
+        if not converged:
+            raise RuntimeError(
+                f"[grad-bc] the separatrix-gradient condition did not "
+                f"converge in {max_it} iterations (last relative residual "
+                f"{abs(history[-1]['residual']) / scale:.3e}, tolerance "
+                f"{tol:.3e}); consider raising grad_bc_max_it or relaxing "
+                f"grad_bc_tol."
+            )
+        hat_slope_c.assign(s)
+        return {
+            "converged":    converged,
+            "iterations":   len(history),
+            "solves":       n_solves,
+            "backtracks":   n_backtracks,
+            "hat_slope":    s,
+            "rel_residual": abs(r) / scale,
+            "history":      history,
+        }
+
+    # ------------------------------------------------------------------
     # Driver
     # ------------------------------------------------------------------
 
@@ -671,9 +885,13 @@ class saarelma_connor_nondim(saarelma_connor):
                       x_res=20,
                       fe_degree=2,
                       ne_inner_bc="neumann",
+                      ne_grad_bc_loc="inner",
                       bc_origin=None,
                       ne_inner=None,
                       dne_dx_inner=None,
+                      dne_dx_outer=None,
+                      grad_bc_tol=1e-8,
+                      grad_bc_max_it=25,
                       initial_guess="tanh",
                       tanh_width=None,
                       tanh_center=None,
@@ -704,16 +922,47 @@ class saarelma_connor_nondim(saarelma_connor):
 
         Boundary conditions
         ===================
+        ``ne_grad_bc_loc="inner"`` (default) -- one condition per end:
+
             hat_n_e (hat_x = 0)        = 1
             hat_n_FC(hat_x = 0)        = nFC_x0 / n0
             hat_n_CX(hat_x = 0)        = nCX_x0 / n0
             hat_n_e (hat_x = -1)       = ne_inner / n0   (Dirichlet option)
          OR hat_n_e'(hat_x = -1)       = L * dne_dx_inner / n0   (Neumann option)
 
+        ``ne_grad_bc_loc="outer"`` -- both n_e conditions at the
+        separatrix (Saarelma et al. 2023 Sec. 2.3), inner boundary free:
+
+            hat_n_e (hat_x = 0)        = 1
+            hat_n_e'(hat_x = 0)        = L * dne_dx_outer / n0
+            hat_n_FC(hat_x = 0)        = nFC_x0 / n0
+            hat_n_CX(hat_x = 0)        = nCX_x0 / n0
+            (nothing imposed at hat_x = -1)
+
         Parameters
         ----------
         See :meth:`saarelma_connor.solve_coupled`.  All physical inputs
         are in SI units.
+
+        ne_grad_bc_loc : {"inner", "outer"}, default "inner"
+            Which end of the domain carries the prescribed dn_e/dx; see
+            the module docstring.  ``"outer"`` frees the inner boundary
+            entirely and forces ``ne_inner_bc="neumann"`` internally
+            (the ds(1) flux becomes the unknown that the separatrix
+            gradient determines), so a requested inner Dirichlet
+            condition is ignored with a ``RuntimeWarning``.
+        dne_dx_outer : float or None
+            SI separatrix slope dn_e/dx|_{x=0} (m^-4) used when
+            ``ne_grad_bc_loc="outer"``.  Taken from the same origins as
+            the inner slope: given explicitly it wins for any
+            ``bc_origin`` (this is how Saarelma Eq. (20) is fed in);
+            left None it is read off the p-file gradient at x = 0, which
+            requires a p-file-backed ``bc_origin``.
+        grad_bc_tol : float, default 1e-8
+            Relative tolerance on hat_n_e'(0) - target for the
+            ``"outer"`` secant iteration.
+        grad_bc_max_it : int, default 25
+            Maximum secant iterations for the ``"outer"`` mode.
 
         tanh_width is in x units
 
@@ -855,6 +1104,18 @@ class saarelma_connor_nondim(saarelma_connor):
             raise ValueError(
                 f"ne_inner_bc must be 'dirichlet' or 'neumann', got {ne_inner_bc!r}."
             )
+        ne_grad_bc_loc = self._check_ne_grad_bc_loc(ne_grad_bc_loc)
+        if ne_grad_bc_loc == "outer" and ne_inner_bc == "dirichlet":
+            # Both n_e conditions live at the separatrix in this mode, so
+            # the inner boundary must stay free: its flux is the unknown
+            # that the separatrix-gradient constraint determines.
+            warnings.warn(
+                "ne_grad_bc_loc='outer' leaves the inner boundary free; "
+                "the requested ne_inner_bc='dirichlet' is ignored.",
+                RuntimeWarning, stacklevel=2,
+            )
+            ne_inner_bc = "neumann"
+        self.ne_grad_bc_loc = ne_grad_bc_loc
 
         # Read off ne(x_inner), dne/dx(x_inner) in SI -- same conventions
         # as solver.py.solve_coupled.
@@ -897,6 +1158,16 @@ class saarelma_connor_nondim(saarelma_connor):
             raise ValueError(
                 f"bc_origin must be 'p-file' or 'user' or 'p-file user combo', got {bc_origin!r}."
             )
+
+        # Separatrix slope, from the same origins as the inner slope.  In
+        # "outer" mode dne_dx_inner_val no longer imposes anything: it
+        # only seeds the secant iteration for the free inner flux.
+        if ne_grad_bc_loc == "outer":
+            dne_dx_outer_val = self._outer_slope_value_nondim(
+                bc_origin, dne_dx_outer,
+            )
+        else:
+            dne_dx_outer_val = None
 
         if float(self.x_inner) >= 0.0:
             raise ValueError(
@@ -1105,17 +1376,27 @@ class saarelma_connor_nondim(saarelma_connor):
         hat_nFC_x0     = self.nFC_x0    / self._n0_nd
         hat_nCX_x0     = self.nCX_x0    / self._n0_nd
         hat_dne_dx_inner = self._L_nd * dne_dx_inner_val / self._n0_nd
+        hat_dne_dx_outer = (
+            None if dne_dx_outer_val is None
+            else self._L_nd * dne_dx_outer_val / self._n0_nd
+        )
 
         if v:
             print(f"[nondim] x_inner          = {self.x_inner:.4e} m")
             print(f"[nondim] ne_inner_bc      = {ne_inner_bc!r}")
+            print(f"[nondim] ne_grad_bc_loc   = {ne_grad_bc_loc!r}")
             print(f"[nondim] ne(x_inner)      = {ne_inner_val:.3e} m^-3 ({bc_origin})")
             print(f"[nondim] dne/dx(x_inner)  = {dne_dx_inner_val:.3e} m^-4 ({bc_origin})")
             print(f"[nondim] hat_ne(0)        = {hat_ne_x0}")
             print(f"[nondim] hat_ne(-1)       = {hat_ne_inner:.3e}")
             print(f"[nondim] hat_nFC(0)       = {hat_nFC_x0:.3e}")
             print(f"[nondim] hat_nCX(0)       = {hat_nCX_x0:.3e}")
-            print(f"[nondim] hat_dne/dxhat(-1)= {hat_dne_dx_inner:.3e}")
+            print(f"[nondim] hat_dne/dxhat(-1)= {hat_dne_dx_inner:.3e}"
+                  f"{' (secant seed only)' if ne_grad_bc_loc == 'outer' else ''}")
+            if ne_grad_bc_loc == "outer":
+                print(f"[nondim] dne/dx(0)        = {dne_dx_outer_val:.3e}"
+                      f" m^-4 ({bc_origin})")
+                print(f"[nondim] hat_dne/dxhat(0) = {hat_dne_dx_outer:.3e}")
 
         # Frozen ETG and NEO contributions in hat-units.
         hat_C_ETG_arr = (
@@ -1361,6 +1642,23 @@ class saarelma_connor_nondim(saarelma_connor):
             ksp_max_it=ksp_max_it,
         )
 
+        # One nonlinear solve.  In "inner" mode that is the bare SNES
+        # solve; in "outer" mode it is the secant iteration that pins
+        # hat_n_e'(0) by treating the (unconstrained) inner flux as the
+        # unknown.  Inside the Picard loop the slope carries over between
+        # iterations, so later shootings start already close.
+        self.grad_bc_info = None
+
+        def _solve_once():
+            if ne_grad_bc_loc == "inner":
+                solve(F == 0, u, bcs=bcs, solver_parameters=snes_params)
+            else:
+                self.grad_bc_info = self._shoot_outer_grad_nondim(
+                    F, u, bcs, snes_params,
+                    hat_ne_curr, hat_dne_dx_inner_c, hat_dne_dx_outer,
+                    float(grad_bc_tol), int(grad_bc_max_it), v,
+                )
+
         if kbm_treatment == "picard":
             # ----------------------------------------------------------
             # Outer Picard loop (Saarelma et al. 2023): freeze the KBM
@@ -1378,7 +1676,7 @@ class saarelma_connor_nondim(saarelma_connor):
                 n_picard = it
                 # Solve with the currently frozen KBM coefficients
                 # (warm start from the previous iterate stored in u).
-                solve(F == 0, u, bcs=bcs, solver_parameters=snes_params)
+                _solve_once()
                 hat_ne_new = u.subfunctions[0].dat.data.copy()
 
                 dn_rel = (
@@ -1465,7 +1763,7 @@ class saarelma_connor_nondim(saarelma_connor):
                     "picard_relax < 1."
                 )
         else:
-            solve(F == 0, u, bcs=bcs, solver_parameters=snes_params)
+            _solve_once()
 
         # ------------------------------------------------------------------
         # Extract converged hat profiles, then recover SI profiles.
@@ -1487,6 +1785,18 @@ class saarelma_connor_nondim(saarelma_connor):
         self.u_fd = u
         self.W_fd = W
         self.V_fd = V
+
+        if ne_grad_bc_loc == "outer":
+            # The inner slope was the unknown in this mode; report the
+            # value the separatrix-gradient condition selected for it.
+            self.dne_dx_inner_solved = (
+                float(hat_dne_dx_inner_c) * self._n0_nd / self._L_nd
+            )
+            if v:
+                print(f"[grad-bc] converged in "
+                      f"{self.grad_bc_info['iterations']} iterations; free "
+                      f"dne/dx(x_inner) = "
+                      f"{self.dne_dx_inner_solved:.3e} m^-4")
 
         if v:
             print(
