@@ -90,7 +90,8 @@ equilibrium / kinetic / cross-section setup is inherited unchanged.
 import warnings
 
 import numpy as np
-from scipy.integrate import cumulative_trapezoid
+from scipy.integrate import cumulative_trapezoid, solve_bvp
+from scipy.interpolate import interp1d
 
 try:
     from firedrake import (
@@ -106,6 +107,7 @@ except Exception as _firedrake_import_err:
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
 from src.solver import saarelma_connor
+from src import bc_ig_helpers as bcig
 
 
 # Conversion constant (eV -> J)
@@ -333,7 +335,8 @@ class saarelma_connor_nondim(saarelma_connor):
     # ------------------------------------------------------------------
 
     def calc_pressure_quantities_nondim(self, hat_n_e,
-                                        gate_mode=None):
+                                        gate_mode=None,
+                                        hat_x_dofs=None):
         """Non-dim version of :meth:`saarelma_connor.calc_pressure_quantities`.
 
         Computes the pedestal-averaged Connor-Hastie alpha in physical
@@ -380,7 +383,11 @@ class saarelma_connor_nondim(saarelma_connor):
         self.alpha_local_ped : ndarray
             Local Connor-Hastie alpha in DOF order (diagnostic).
         """
-        hat_x_dofs = self._fd_cache["hat_x_dofs"]
+        # The Firedrake path leaves this None and uses the cached FE DOFs;
+        # the scipy path passes its own (ascending) collocation grid.
+        if hat_x_dofs is None:
+            hat_x_dofs = self._fd_cache["hat_x_dofs"]
+        hat_x_dofs = np.asarray(hat_x_dofs, dtype=float)
         sort_idx = np.argsort(hat_x_dofs)
         unsort_idx = np.argsort(sort_idx)
         hat_x = hat_x_dofs[sort_idx]
@@ -626,15 +633,16 @@ class saarelma_connor_nondim(saarelma_connor):
             hat_A_KBM_term, hat_B_KBM_term,
             hat_T_fd, hat_dT_dx_fd,
             hat_Si_fd, hat_nFC, hat_nCX,
-            v_e, ne_inner_bc, hat_dne_dx_inner_c,
+            v_e, hat_dne_dx_inner_c,
             hat_A_KBM_bc_term=None, hat_B_KBM_bc_term=None):
         """Dimensionless n_e weak form -- Eq. (eq:weak-hat-A8) of App. A.8.
 
         Integrals are over hat_x in [-1, 0] (the Firedrake mesh).  The
         Neumann boundary contribution at hat_x = -1 (boundary id 1) is
-        added when ne_inner_bc == "neumann", evaluated using the
-        Dirichlet-type expansion of hat_D consistent with the parent
-        solver.
+        always present -- the prescribed inner flux in the "inner"
+        pathway, the free (secant-driven) inner flux in the "outer"
+        pathway -- evaluated using the Dirichlet-type expansion of
+        hat_D consistent with the parent solver.
 
         ``hat_A_KBM_term`` and ``hat_B_KBM_term`` are UFL expressions
         (or Functions) carrying the KBM coefficients.  In
@@ -666,8 +674,8 @@ class saarelma_connor_nondim(saarelma_connor):
             - hat_ne * hat_Si_fd * (hat_nFC + hat_nCX) * v_e
         ) * dx
 
-        if ne_inner_bc == "neumann":
-            # Boundary id 1 = left endpoint = inner boundary = hat_x = -1.
+        # Boundary id 1 = left endpoint = inner boundary = hat_x = -1.
+        if True:
             # The flux at hat_x = -1 reuses the same expansion of hat_D
             # but with the prescribed slope substituted for hat_n_e'.
             hat_D_bc = (
@@ -700,43 +708,9 @@ class saarelma_connor_nondim(saarelma_connor):
     # Separatrix-gradient boundary condition (ne_grad_bc_loc="outer")
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _check_ne_grad_bc_loc(ne_grad_bc_loc):
-        """Validate and normalise the gradient-BC placement flag."""
-        loc = str(ne_grad_bc_loc).lower()
-        if loc not in ("inner", "outer"):
-            raise ValueError(
-                f"ne_grad_bc_loc must be 'inner' or 'outer', got "
-                f"{ne_grad_bc_loc!r}."
-            )
-        return loc
-
-    def _outer_slope_value_nondim(self, bc_origin, dne_dx_outer):
-        """SI separatrix slope dn_e/dx|_{x=0} (m^-4) for the "outer" mode.
-
-        Drawn from the same sources as the inner-boundary slope: an
-        explicit user value if one is given, otherwise the p-file
-        density gradient -- here evaluated at x = 0 rather than at
-        x_inner.  Passing the value explicitly is how the Saarelma
-        Eq. (20) SOL closure (dn_e/dx|_0 = -n_e(0)/sqrt(D_SOL tau_par))
-        is fed to the solver.
-
-        Also stored as ``self.dne_dx_outer``.
-        """
-        if dne_dx_outer is not None:
-            val = float(dne_dx_outer)
-        elif str(bc_origin).lower() in (
-            "p-file", "p-file user combo", "manual epednn loop",
-        ):
-            dne_dx_pres = np.gradient(self.n_e_pres, self.x_init)
-            val = float(np.interp(0.0, self.x_init, dne_dx_pres))
-        else:
-            raise ValueError(
-                f"bc_origin={bc_origin!r} with ne_grad_bc_loc='outer' "
-                "requires dne_dx_outer to be given."
-            )
-        self.dne_dx_outer = val
-        return val
+    # Boundary-condition resolution and initial guesses live in
+    # src/bc_ig_helpers.py so the 1D/3D x firedrake/scipy solvers share
+    # exactly one implementation; see that module's docstring.
 
     def _shoot_outer_grad_nondim(
         self, F, u, bcs, snes_params,
@@ -828,9 +802,8 @@ class saarelma_connor_nondim(saarelma_connor):
                     raise RuntimeError(
                         "[grad-bc] secant iteration stalled: the separatrix "
                         "gradient did not respond to a change in the inner "
-                        "flux.  Check that ne_inner_bc='neumann' (no "
-                        "Dirichlet condition may be imposed at the inner "
-                        "boundary in ne_grad_bc_loc='outer' mode)."
+                        "flux.  In ne_grad_bc_loc='outer' mode nothing "
+                        "may be imposed at the inner boundary."
                     )
                 step = -r * (s - s_prev) / denom
                 if step_prev is not None and abs(step) > 4.0 * abs(step_prev):
@@ -878,12 +851,398 @@ class saarelma_connor_nondim(saarelma_connor):
         }
 
     # ------------------------------------------------------------------
+    # Shared boundary-condition / initial-guess resolution
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # scipy (solve_bvp) implementation of the coupled three-equation model
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_solver_structure(solver_structure):
+        """Validate and normalise the discretisation-choice flag."""
+        s = str(solver_structure).lower()
+        if s not in ("firedrake", "scipy"):
+            raise ValueError(
+                f"solver_structure must be 'firedrake' or 'scipy', got "
+                f"{solver_structure!r}."
+            )
+        return s
+
+    def _scipy_coefficients_nondim(self):
+        """Linear interpolants of the frozen non-dim coefficients in hat_x.
+
+        Every coefficient lives on ``self.x_init`` in SI; each returned
+        callable takes hat_x and applies ``x = L * hat_x`` internally, so
+        the ODE right-hand side never has to think about units.  Linear
+        interpolation matches the ``np.interp`` sampling the Firedrake
+        path uses to fill its coefficient Functions, so the two
+        discretisations see the same coefficient reconstruction.
+        """
+        def _mk(arr, scale=1.0):
+            f = interp1d(self.x_init, np.asarray(arr, dtype=float) * scale,
+                         kind='linear', bounds_error=False,
+                         fill_value='extrapolate')
+            return lambda hat_x: f(self._from_hat_x(hat_x))
+
+        return {
+            'g':      _mk(self.gradr2_fsa),
+            'Si':     _mk(self.S_i_pres,  1.0 / self._S0_nd),
+            'Scx':    _mk(self.S_cx_pres, 1.0 / self._S0_nd),
+            'Vcx':    _mk(np.abs(self.V_cx_pres), 1.0 / self._V0_nd),
+            'fFC':    _mk(self.fFC),
+            'fCX':    _mk(self.fCX),
+            'D_NEO':  _mk(self.D_NEO,  1.0 / self._D0_nd),
+            'C_ETG':  _mk(self.C_ETG,  1.0 / self._ETG_scale_nd),
+            'VFC':    abs(self.V_FC) / self._V0_nd,
+        }
+
+    def solve_coupled_nondim_scipy(self,
+                                   x_res=200,
+                                   ne_inner_bc="neumann",
+                                   ne_grad_bc_loc="inner",
+                                   bc_origin=None,
+                                   ne_inner=None,
+                                   dne_dx_inner=None,
+                                   dne_dx_outer=None,
+                                   initial_guess="tanh",
+                                   tanh_width=None,
+                                   tanh_center=None,
+                                   picard_gate_mode="average",
+                                   picard_max_it=50,
+                                   picard_rtol=1e-8,
+                                   picard_relax=1.0,
+                                   bvp_tol=1e-6,
+                                   bvp_max_nodes=50000,
+                                   reuse_setup=True,
+                                   scale_ne_inner=None,
+                                   ne_floor=1e-8,
+                                   verbose=None):
+        """scipy (``solve_bvp``) solver for the coupled three-equation model.
+
+        Same physics, non-dimensionalisation and boundary conditions as
+        :meth:`solve_coupled_nondim`, discretised by collocation instead
+        of finite elements.  Reached through
+        ``solve_coupled_nondim(solver_structure="scipy", ...)``.
+
+        Formulation
+        ===========
+        Equations (8)-(10) of the writeup form a *fourth*-order system
+        (second order in hat_n_e, first order in each neutral), which is
+        exactly Saarelma et al. 2023 Sec. 2.3's "fourth order system
+        requiring four boundary-conditions".  ``solve_bvp`` wants an
+        explicit first-order system, so the state carries the three
+        **fluxes** rather than the derivatives:
+
+            Y = [ hat_n_e,  Phi,  U,  W ]
+
+            Phi = hat_f * hat_n_e'          electron flux
+            U   = f_FC * hat_g * hat_n_FC   FC neutral flux / hat_V_FC
+            W   = hat_V_CX * f_CX * hat_g * hat_n_CX   CX neutral flux
+
+        with the conductance ``hat_f(hat_x, hat_n_e) = hat_g (hat_D_NEO
+        + hat_D_KBM) + hat_g hat_C_ETG / hat_n_e``.  The system is then
+
+            hat_n_e' = Phi / hat_f
+            Phi'     = -hat_n_e hat_S_i (hat_n_FC + hat_n_CX)
+            U'       =  hat_n_e (hat_S_i + hat_S_CX) hat_n_FC / hat_V_FC
+            W'       =  hat_n_e (hat_S_i hat_n_CX - hat_S_CX hat_n_FC / 2)
+
+        recovering hat_n_FC = U / (f_FC hat_g) and hat_n_CX = W /
+        (hat_V_CX f_CX hat_g).  Writing it this way means **no
+        coefficient derivatives appear anywhere** -- unlike
+        ``solve_sc_scipy``, which expands d/dx[f n_e'] and therefore
+        needs df/dx off the coarse p-file grid (the accuracy-limiting
+        step noted in ``solver_sc``'s module docstring).  Here the
+        divergence form is kept intact, as in the Firedrake weak form.
+
+        Boundary conditions
+        ===================
+        Four residuals, placed exactly as in the Firedrake path (see
+        ``ne_grad_bc_loc`` in the module docstring).  ``solve_bvp`` only
+        needs the right *number* of residuals and does not care which end
+        they are evaluated at, so ``ne_grad_bc_loc="outer"`` -- both
+        hat_n_e conditions at the separatrix -- needs no shooting here.
+
+        KBM treatment
+        =============
+        Only the Picard-frozen gate is supported: hat_D_KBM is refrozen
+        from the latest hat_n_e between outer iterations, which is the
+        Saarelma Eqs. 24-25 treatment and matches
+        ``solve_sc_scipy``.  ``picard_gate_mode="average"`` puts the
+        whole frozen diffusivity in the D-slot with hat_B_KBM = 0, so
+        hat_f depends on hat_x and hat_n_e only.  The Firedrake path's
+        ``kbm_treatment="inline"`` (smoothed local gate) has hat_f
+        depending on hat_n_e' as well, which would make Phi -> hat_n_e'
+        a per-point root-find; that is not implemented here.
+
+        Returns
+        -------
+        x_sol, ne_sol, nFC_sol, nCX_sol, T_e_pres, psi_N_pres
+            Same tuple as :meth:`solve_coupled_nondim`, in SI units.
+        """
+        v = self.verbose if verbose is None else bool(verbose)
+        force_setup = not reuse_setup
+
+        bcig.reject_legacy_ne_inner_bc(ne_inner_bc)
+        ne_grad_bc_loc = bcig.check_ne_bc_loc(ne_grad_bc_loc)
+        self.ne_grad_bc_loc = ne_grad_bc_loc
+        picard_gate_mode = str(picard_gate_mode).lower()
+        if picard_gate_mode != "average":
+            raise NotImplementedError(
+                "solver_structure='scipy' supports picard_gate_mode='average' "
+                f"only (got {picard_gate_mode!r}).  'majority' freezes the "
+                "local A/B KBM structure, which makes the conductance depend "
+                "on hat_n_e' and turns Phi -> hat_n_e' into a per-point "
+                "root-find; use solver_structure='firedrake' for it."
+            )
+        picard_relax = float(picard_relax)
+        if not (0.0 < picard_relax <= 1.0):
+            raise ValueError(
+                f"picard_relax must be in (0, 1], got {picard_relax}."
+            )
+
+        # Equilibrium / kinetic / ETG setup -- pure numpy, no Firedrake.
+        self._ensure_firedrake_coefficient_grids(x_res, force=force_setup)
+        self.construct_C_ETG()
+
+        self.x_inner = np.interp(self.psi_N_inner_boundary, self.psi_N_pres, self.x_init)
+
+        # Only the two conditions belonging to ne_grad_bc_loc are looked up.
+        nebcs = bcig.resolve_ne_bcs(
+            self, ne_grad_bc_loc, bc_origin=bc_origin,
+            dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
+            ne_inner=ne_inner, scale_ne_inner=scale_ne_inner,
+        )
+        self.ne_bcs = nebcs
+
+        self._set_nondim_scales(verbose=v)
+        L, n0 = self._L_nd, self._n0_nd
+
+        # Non-dim BC values
+        # hat_dne_dx_bc is the single Neumann value; ne_grad_bc_loc says
+        # which end of the domain it is imposed at.
+        hat_ne_x0     = nebcs.ne_outer / n0        # = 1 by construction
+        hat_nFC_x0    = self.nFC_x0 / n0
+        hat_nCX_x0    = self.nCX_x0 / n0
+        hat_dne_dx_bc = L * nebcs.dne_dx / n0
+
+        if v:
+            print(nebcs.describe(prefix="[nondim scipy] "))
+            print(f"[nondim scipy] hat_nFC(0)       = {hat_nFC_x0:.3e}")
+            print(f"[nondim scipy] hat_nCX(0)       = {hat_nCX_x0:.3e}")
+
+        # Collocation grid (ascending, hat_x in [-1, 0]) and coefficients.
+        hat_x = np.linspace(-1.0, 0.0, int(x_res))
+        x_si = self._from_hat_x(hat_x)
+        c = self._scipy_coefficients_nondim()
+        VFC = c['VFC']
+        ne_floor = float(ne_floor)
+
+        # ---- Initial guess ------------------------------------------------
+        ne_init = bcig.build_ne_initial_guess(
+            self, x_si, initial_guess, nebcs,
+            tanh_width=tanh_width, tanh_center=tanh_center,
+        )
+        self.ne_init = ne_init
+        N_g = np.clip(ne_init / n0, ne_floor, None)
+
+        # KBM diffusivity frozen from the initial guess (Saarelma Eq. 25).
+        self.calc_pressure_quantities_nondim(N_g, gate_mode="average",
+                                             hat_x_dofs=hat_x)
+        hat_D_KBM = self._hat_D_KBM.copy()
+
+        def conductance(hat_x_q, N_q, D_KBM_q):
+            """hat_f = hat_g (hat_D_NEO + hat_D_KBM) + hat_g hat_C_ETG / N."""
+            g_q = c['g'](hat_x_q)
+            return g_q * (c['D_NEO'](hat_x_q) + D_KBM_q) + g_q * c['C_ETG'](hat_x_q) / N_q
+
+        # Neutral seeds by integrating factor at the guessed density: the FC
+        # equation is exactly U' = U * a(x) once hat_n_e is fixed, and the CX
+        # equation is seeded with its homogeneous solution (the FC source term
+        # is left to solve_bvp).  Both decay inward from the separatrix, which
+        # is the behaviour the collocation mesh has to resolve.
+        def neutral_seed(N_q, D_KBM_q):
+            g_q, fFC_q, fCX_q = c['g'](hat_x), c['fFC'](hat_x), c['fCX'](hat_x)
+            Vcx_q, Si_q, Scx_q = c['Vcx'](hat_x), c['Si'](hat_x), c['Scx'](hat_x)
+            a = N_q * (Si_q + Scx_q) / (VFC * fFC_q * g_q)
+            b = N_q * Si_q / (Vcx_q * fCX_q * g_q)
+            # int_0^x, i.e. measured back from the separatrix (last point)
+            Ia = cumulative_trapezoid(a, hat_x, initial=0.0)
+            Ib = cumulative_trapezoid(b, hat_x, initial=0.0)
+            U0 = hat_nFC_x0 * fFC_q[-1] * g_q[-1]
+            W0 = hat_nCX_x0 * Vcx_q[-1] * fCX_q[-1] * g_q[-1]
+            U_q = U0 * np.exp(np.clip(Ia - Ia[-1], -700.0, 700.0))
+            W_q = W0 * np.exp(np.clip(Ib - Ib[-1], -700.0, 700.0))
+            return U_q, W_q
+
+        U_g, W_g = neutral_seed(N_g, hat_D_KBM)
+        Phi_g = conductance(hat_x, N_g, hat_D_KBM) * np.gradient(N_g, hat_x)
+        Y_guess = np.vstack([N_g, Phi_g, U_g, W_g])
+
+        # ---- Residuals ----------------------------------------------------
+        # D_KBM is frozen per Picard iteration, so it enters the ODE through
+        # an interpolant rebuilt each time round the loop.
+        D_KBM_x = interp1d(hat_x, hat_D_KBM, kind='linear',
+                           bounds_error=False, fill_value='extrapolate')
+
+        def ode(xq, Y):
+            N, Phi, U, W = Y
+            N_s = np.clip(N, ne_floor, None)
+            g_q = c['g'](xq)
+            fFC_q, fCX_q, Vcx_q = c['fFC'](xq), c['fCX'](xq), c['Vcx'](xq)
+            Si_q, Scx_q = c['Si'](xq), c['Scx'](xq)
+            f_q = g_q * (c['D_NEO'](xq) + D_KBM_x(xq)) + g_q * c['C_ETG'](xq) / N_s
+            nFC = U / (fFC_q * g_q)
+            nCX = W / (Vcx_q * fCX_q * g_q)
+            return np.vstack([
+                Phi / f_q,
+                -N * Si_q * (nFC + nCX),
+                N * (Si_q + Scx_q) * nFC / VFC,
+                N * (Si_q * nCX - 0.5 * Scx_q * nFC),
+            ])
+
+        # Separatrix (hat_x = 0) conversions between density and flux.
+        g0, fFC0, fCX0, Vcx0 = (float(c['g'](0.0)), float(c['fFC'](0.0)),
+                                float(c['fCX'](0.0)), float(c['Vcx'](0.0)))
+        U_x0 = hat_nFC_x0 * fFC0 * g0
+        W_x0 = hat_nCX_x0 * Vcx0 * fCX0 * g0
+
+        def bc(Ya, Yb):
+            # Yb is the separatrix (hat_x = 0), Ya the inner boundary (-1).
+            res = [Yb[0] - hat_ne_x0,      # n_e(0)   = ne_x0
+                   Yb[2] - U_x0,           # n_FC(0)  = nFC_x0
+                   Yb[3] - W_x0]           # n_CX(0)  = nCX_x0
+            if ne_grad_bc_loc == "outer":
+                # Fourth condition also at the separatrix: n_e'(0) prescribed,
+                # i.e. Phi(0) = hat_f(0, n_e(0)) * hat_dne_dx_bc.
+                f0 = conductance(0.0, max(Yb[0], ne_floor), float(D_KBM_x(0.0)))
+                res.append(Yb[1] - f0 * hat_dne_dx_bc)
+            else:                                   # Neumann at the inner end
+                fin = conductance(-1.0, max(Ya[0], ne_floor), float(D_KBM_x(-1.0)))
+                res.append(Ya[1] - fin * hat_dne_dx_bc)
+            return np.array(res)
+
+        # ---- Picard loop on the frozen KBM diffusivity --------------------
+        picard_history = []
+        picard_converged = False
+        n_picard = 0
+        prev_gate = bool(self.kbm_gate_on)
+        x_prev, Y_prev = hat_x, Y_guess
+        sol = None
+
+        for it in range(1, int(picard_max_it) + 1):
+            n_picard = it
+            D_KBM_x = interp1d(hat_x, hat_D_KBM, kind='linear',
+                               bounds_error=False, fill_value='extrapolate')
+
+            Y_start = np.vstack([np.interp(hat_x, x_prev, Y_prev[k])
+                                 for k in range(4)])
+            sol = solve_bvp(ode, bc, hat_x, Y_start,
+                            tol=bvp_tol, max_nodes=int(bvp_max_nodes),
+                            verbose=0)
+            if not sol.success:
+                raise RuntimeError(
+                    f"[nondim scipy] Picard iteration {it} BVP failed: "
+                    f"{sol.message}"
+                )
+
+            N_new = np.interp(hat_x, sol.x, sol.y[0])
+            dn_rel = (np.max(np.abs(N_new - np.interp(hat_x, x_prev, Y_prev[0])))
+                      / max(np.max(np.abs(N_new)), 1e-300))
+            x_prev, Y_prev = sol.x, sol.y
+
+            # Refreeze the gate / diffusivity from the new profile.
+            self.calc_pressure_quantities_nondim(
+                np.clip(N_new, ne_floor, None), gate_mode="average",
+                hat_x_dofs=hat_x,
+            )
+            gate_now = bool(self.kbm_gate_on)
+            hat_D_KBM = (picard_relax * self._hat_D_KBM
+                         + (1.0 - picard_relax) * hat_D_KBM)
+
+            picard_history.append({
+                "iteration":        it,
+                "alpha_bar":        float(self.alpha_bar_ped),
+                "alpha_frac_above": float(self.alpha_frac_above),
+                "kbm_gate_on":      gate_now,
+                "dne_rel":          float(dn_rel),
+            })
+            if v:
+                print(f"[nondim scipy] picard it {it:3d}: "
+                      f"|dne|_rel = {dn_rel:.3e}, "
+                      f"alpha_bar = {self.alpha_bar_ped:.4f}, "
+                      f"KBM {'ON' if gate_now else 'OFF'}")
+            if dn_rel < float(picard_rtol) and gate_now == prev_gate:
+                picard_converged = True
+                break
+            prev_gate = gate_now
+
+        self.picard_info = {
+            "converged":  picard_converged,
+            "iterations": n_picard,
+            "gate_mode":  picard_gate_mode,
+            "history":    picard_history,
+        }
+        self.kbm_info = {
+            "treatment":  "picard",
+            "alpha_crit": float(self.alpha_crit),
+            "picard_gate_mode": picard_gate_mode,
+            "picard_converged": picard_converged,
+            "picard_iterations": n_picard,
+            "solver_structure": "scipy",
+        }
+        if not picard_converged:
+            raise RuntimeError(
+                f"[nondim scipy] Picard loop did not converge in "
+                f"{picard_max_it} iterations "
+                f"(last |dne|_rel = {picard_history[-1]['dne_rel']:.3e}); "
+                "consider increasing picard_max_it or setting "
+                "picard_relax < 1."
+            )
+
+        # ---- Recover the densities and store, SI + hat --------------------
+        hat_x_sol = sol.x
+        N_sol, Phi_sol, U_sol, W_sol = sol.y
+        g_s, fFC_s, fCX_s = (c['g'](hat_x_sol), c['fFC'](hat_x_sol),
+                             c['fCX'](hat_x_sol))
+        Vcx_s = c['Vcx'](hat_x_sol)
+        nFC_sol = U_sol / (fFC_s * g_s)
+        nCX_sol = W_sol / (Vcx_s * fCX_s * g_s)
+        f_sol = conductance(hat_x_sol, np.clip(N_sol, ne_floor, None),
+                            D_KBM_x(hat_x_sol))
+
+        self.hat_x_sol   = hat_x_sol
+        self.hat_ne_sol  = N_sol
+        self.hat_nFC_sol = nFC_sol
+        self.hat_nCX_sol = nCX_sol
+
+        self.x_sol   = hat_x_sol * L
+        self.ne_sol  = N_sol   * n0
+        self.nFC_sol = nFC_sol * n0
+        self.nCX_sol = nCX_sol * n0
+        self.dne_dx_sol = (Phi_sol / f_sol) * (n0 / L)     # SI m^-4
+        self.sol = sol
+
+        if v:
+            print(
+                f"[nondim scipy] solved on {hat_x_sol.size} collocation nodes.\n"
+                f"  n_e  in [{self.ne_sol.min():.3e}, {self.ne_sol.max():.3e}] m^-3\n"
+                f"  n_FC in [{self.nFC_sol.min():.3e}, {self.nFC_sol.max():.3e}] m^-3\n"
+                f"  n_CX in [{self.nCX_sol.min():.3e}, {self.nCX_sol.max():.3e}] m^-3"
+            )
+
+        return (self.x_sol, self.ne_sol, self.nFC_sol, self.nCX_sol,
+                self.T_e_pres, self.psi_N_pres)
+
+    # ------------------------------------------------------------------
     # Driver
     # ------------------------------------------------------------------
 
     def solve_coupled_nondim(self,
                       x_res=20,
                       fe_degree=2,
+                      solver_structure="firedrake",
                       ne_inner_bc="neumann",
                       ne_grad_bc_loc="inner",
                       bc_origin=None,
@@ -892,6 +1251,7 @@ class saarelma_connor_nondim(saarelma_connor):
                       dne_dx_outer=None,
                       grad_bc_tol=1e-8,
                       grad_bc_max_it=25,
+                      grad_bc_seed=None,
                       initial_guess="tanh",
                       tanh_width=None,
                       tanh_center=None,
@@ -910,6 +1270,9 @@ class saarelma_connor_nondim(saarelma_connor):
                       picard_relax=1.0,
                       neutrals_treatment="fem",
                       n_neutral_sub=4001,
+                      bvp_tol=1e-6,
+                      bvp_max_nodes=50000,
+                      ne_floor=1e-8,
                       verbose=None):
         """Non-dimensional Firedrake solver for the coupled three-equation
         Saarelma--Connor neutral-transport pedestal model.
@@ -944,6 +1307,18 @@ class saarelma_connor_nondim(saarelma_connor):
         See :meth:`saarelma_connor.solve_coupled`.  All physical inputs
         are in SI units.
 
+        solver_structure : {"firedrake", "scipy"}, default "firedrake"
+            Which discretisation solves the coupled system.  ``"scipy"``
+            forwards to :meth:`solve_coupled_nondim_scipy` (collocation
+            via ``solve_bvp``); it supports ``picard_gate_mode="average"``
+            only.  Firedrake-only arguments (``fe_degree``,
+            ``linear_solver``, ``ksp_*``, ``kbm_treatment="inline"``,
+            ``neutrals_treatment``, ``grad_bc_*``) do not apply there.
+        bvp_tol, bvp_max_nodes : float, int
+            ``solve_bvp`` controls, used only by ``solver_structure="scipy"``.
+        ne_floor : float
+            Lower clip on hat_n_e keeping hat_C_ETG / hat_n_e finite in
+            the scipy driver.
         ne_grad_bc_loc : {"inner", "outer"}, default "inner"
             Which end of the domain carries the prescribed dn_e/dx; see
             the module docstring.  ``"outer"`` frees the inner boundary
@@ -1085,6 +1460,33 @@ class saarelma_connor_nondim(saarelma_connor):
                 f"error:\n  {_FIREDRAKE_IMPORT_ERR}"
             )
 
+        solver_structure = self._check_solver_structure(solver_structure)
+        if solver_structure == "scipy":
+            # Collocation instead of finite elements; see
+            # solve_coupled_nondim_scipy for the flux-variable formulation.
+            return self.solve_coupled_nondim_scipy(
+                x_res=x_res,
+                ne_inner_bc=ne_inner_bc,
+                ne_grad_bc_loc=ne_grad_bc_loc,
+                bc_origin=bc_origin,
+                ne_inner=ne_inner,
+                dne_dx_inner=dne_dx_inner,
+                dne_dx_outer=dne_dx_outer,
+                initial_guess=initial_guess,
+                tanh_width=tanh_width,
+                tanh_center=tanh_center,
+                picard_gate_mode=picard_gate_mode,
+                picard_max_it=picard_max_it,
+                picard_rtol=picard_rtol,
+                picard_relax=picard_relax,
+                bvp_tol=bvp_tol,
+                bvp_max_nodes=bvp_max_nodes,
+                reuse_setup=reuse_setup,
+                scale_ne_inner=scale_ne_inner,
+                ne_floor=ne_floor,
+                verbose=verbose,
+            )
+
         v = self.verbose if verbose is None else bool(verbose)
         force_setup = not reuse_setup
 
@@ -1095,84 +1497,25 @@ class saarelma_connor_nondim(saarelma_connor):
 
         # Inner boundary location (in SI x); same logic as solver.py.
         if self.psi_N_inner_boundary is None:
-            self.find_inner_boundary()
+            raise ValueError(
+                "need to specify psi_N_inner_boundary. auto psi_N inner boundary method is no longer offered."
+            )
         else:
             self.x_inner = np.interp(self.psi_N_inner_boundary, self.psi_N_pres, self.x_init)
 
-        ne_inner_bc = str(ne_inner_bc).lower()
-        if ne_inner_bc not in ("dirichlet", "neumann"):
-            raise ValueError(
-                f"ne_inner_bc must be 'dirichlet' or 'neumann', got {ne_inner_bc!r}."
-            )
-        ne_grad_bc_loc = self._check_ne_grad_bc_loc(ne_grad_bc_loc)
-        if ne_grad_bc_loc == "outer" and ne_inner_bc == "dirichlet":
-            # Both n_e conditions live at the separatrix in this mode, so
-            # the inner boundary must stay free: its flux is the unknown
-            # that the separatrix-gradient constraint determines.
-            warnings.warn(
-                "ne_grad_bc_loc='outer' leaves the inner boundary free; "
-                "the requested ne_inner_bc='dirichlet' is ignored.",
-                RuntimeWarning, stacklevel=2,
-            )
-            ne_inner_bc = "neumann"
+        bcig.reject_legacy_ne_inner_bc(ne_inner_bc)
+        ne_grad_bc_loc = bcig.check_ne_bc_loc(ne_grad_bc_loc)
         self.ne_grad_bc_loc = ne_grad_bc_loc
 
         # Read off ne(x_inner), dne/dx(x_inner) in SI -- same conventions
-        # as solver.py.solve_coupled.
-        # BC conditions for nFC, nCX, ne will not change throughout EPEDNN loop
-        if bc_origin == "p-file":
-            if self.ne_x0_manual:
-                ne_inner_val = float(np.interp(self.x_inner, self.x_init, self.n_e_pres)) + (self.ne_x0 - float(np.interp(0, self.x_init, self.n_e_pres)))
-            else:
-                ne_inner_val = float(np.interp(self.x_inner, self.x_init, self.n_e_pres))
-            if scale_ne_inner is not None:
-                ne_inner_val = ne_inner_val * scale_ne_inner
-            self.ne_inner = ne_inner_val
-            dne_dx_pres = np.gradient(self.n_e_pres, self.x_init)
-            dne_dx_inner_val = float(np.interp(self.x_inner, self.x_init, dne_dx_pres))
-
-            # debugging
-            # dne_dx_inner_val = 10 * dne_dx_inner_val
-            # print(f"ne_inner_val = {ne_inner_val}, dne_dx_inner_val = {dne_dx_inner_val}") # debugging
-            # print(f"self.x_inner = {self.x_inner}, self.x_init = {self.x_init}") # debugging
-        elif bc_origin == "user":
-            ne_inner_val = float(ne_inner)
-            self.ne_inner = ne_inner_val
-            dne_dx_inner_val = float(dne_dx_inner)
-        elif bc_origin == "p-file user combo":
-            if ne_inner_bc == "neumann": # user specifies n_e(x_inner)
-                dne_dx_pres = np.gradient(self.n_e_pres, self.x_init)
-                dne_dx_inner_val = float(np.interp(self.x_inner, self.x_init, dne_dx_pres))
-                ne_inner_val = float(ne_inner)
-                self.ne_inner = ne_inner_val
-            elif ne_inner_bc == "dirichlet": # user specifies dn_e/dx(x_inner)
-                ne_inner_val = float(np.interp(self.x_inner, self.x_init, self.n_e_pres))
-                self.ne_inner = ne_inner_val
-                dne_dx_inner_val = float(dne_dx_inner)
-        elif bc_origin == "manual EPEDNN loop": # functionally the same as "p-file" since manual_profs overrides the pfile variables
-            ne_inner_val = float(np.interp(self.x_inner, self.x_init, self.n_e_pres))
-            self.ne_inner = ne_inner_val
-            dne_dx_pres = np.gradient(self.n_e_pres, self.x_init)
-            dne_dx_inner_val = float(np.interp(self.x_inner, self.x_init, dne_dx_pres))
-        else:
-            raise ValueError(
-                f"bc_origin must be 'p-file' or 'user' or 'p-file user combo', got {bc_origin!r}."
-            )
-
-        # Separatrix slope, from the same origins as the inner slope.  In
-        # "outer" mode dne_dx_inner_val no longer imposes anything: it
-        # only seeds the secant iteration for the free inner flux.
-        if ne_grad_bc_loc == "outer":
-            dne_dx_outer_val = self._outer_slope_value_nondim(
-                bc_origin, dne_dx_outer,
-            )
-        else:
-            dne_dx_outer_val = None
-
-        if float(self.x_inner) >= 0.0:
-            raise ValueError(
-                f"x_inner = {self.x_inner} must be strictly less than 0 (separatrix)."
-            )
+        # as solver.py.solve_coupled, shared with the scipy driver.
+        # Only the two conditions belonging to ne_grad_bc_loc are looked up.
+        nebcs = bcig.resolve_ne_bcs(
+            self, ne_grad_bc_loc, bc_origin=bc_origin,
+            dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
+            ne_inner=ne_inner, scale_ne_inner=scale_ne_inner,
+        )
+        self.ne_bcs = nebcs
 
         # Compute reference scales now that x_inner / ne_x0 / etc. are known.
         self._set_nondim_scales(verbose=v)
@@ -1205,33 +1548,10 @@ class saarelma_connor_nondim(saarelma_connor):
         # ------------------------------------------------------------------
         # Initial guess (in SI, then rescaled to hat-units).
         # ------------------------------------------------------------------
-        if initial_guess == "linear":
-            xi = (x_dofs_si - x_left_si) / (x_right_si - x_left_si)
-            ne_init  = ne_inner_val + (self.ne_x0 - ne_inner_val) * xi
-        elif initial_guess == "pfile":
-            ne_init = np.interp(x_dofs_si, self.x_init, self.n_e_pres)
-        elif initial_guess == "tanh":
-            width  = float(tanh_width) if tanh_width is not None else 0.1 * abs(x_left_si)
-            if width <= 0:
-                raise ValueError(f"tanh_width must be positive, got {width}.")
-            center = float(tanh_center) if tanh_center is not None else -width
-            s_ne   = 0.5 * (1.0 - np.tanh((x_dofs_si - center) / (0.5 * width)))
-            # s_neut = 1.0 - s_ne
-            ne_init  = self.ne_x0 + (ne_inner_val - self.ne_x0) * s_ne
-        elif initial_guess == "manual EPEDNN loop":
-            order_desc = np.argsort(x_dofs_si)[::-1]
-            x_desc = x_dofs_si[order_desc]
-            x_n_manual = np.interp(
-                self.psi_N_n_manual, self.psi_N_pres, self.x_init
-            )
-            ne_init_on_desc = np.interp(x_desc, x_n_manual, self.n_e_pfile)
-            ne_init = np.empty_like(x_dofs_si)
-            ne_init[order_desc] = ne_init_on_desc
-        else:
-            raise ValueError(
-                f"Unknown initial_guess={initial_guess!r}; expected "
-                "'linear', 'pfile', or 'tanh'."
-            )
+        ne_init = bcig.build_ne_initial_guess(
+            self, x_dofs_si, initial_guess, nebcs,
+            tanh_width=tanh_width, tanh_center=tanh_center,
+        )
 
         # ------------------------------------------------------------------
         # KBM coefficients evaluated at the initial guess.  For
@@ -1371,32 +1691,23 @@ class saarelma_connor_nondim(saarelma_connor):
 
         # Rescale BC values into hat-units (App. A.8 Eq. (eq:hat-flux-A8) etc.) using initial guesses to accommodate Dirichlet or Neumann boundary condition choice
         # BC conditions for nFC, nCX, ne will not change throughout EPEDNN loop
-        hat_ne_x0      = 1.0
-        hat_ne_inner   = ne_init[0]   / self._n0_nd
-        hat_nFC_x0     = self.nFC_x0    / self._n0_nd
-        hat_nCX_x0     = self.nCX_x0    / self._n0_nd
-        hat_dne_dx_inner = self._L_nd * dne_dx_inner_val / self._n0_nd
-        hat_dne_dx_outer = (
-            None if dne_dx_outer_val is None
-            else self._L_nd * dne_dx_outer_val / self._n0_nd
-        )
+        hat_ne_x0        = nebcs.ne_outer / self._n0_nd   # = 1 by construction
+        hat_nFC_x0       = self.nFC_x0  / self._n0_nd
+        hat_nCX_x0       = self.nCX_x0  / self._n0_nd
+        # The single Neumann value.  In "inner" mode it is imposed on ds(1);
+        # in "outer" mode ds(1) carries the *unknown* inner flux and this is
+        # the separatrix-gradient target the secant drives hat_n_e'(0) to, so
+        # it also seeds that search -- the pedestal-top gradient is never
+        # looked up in that pathway.
+        hat_dne_dx_bc    = self._L_nd * nebcs.dne_dx / self._n0_nd
 
         if v:
-            print(f"[nondim] x_inner          = {self.x_inner:.4e} m")
-            print(f"[nondim] ne_inner_bc      = {ne_inner_bc!r}")
-            print(f"[nondim] ne_grad_bc_loc   = {ne_grad_bc_loc!r}")
-            print(f"[nondim] ne(x_inner)      = {ne_inner_val:.3e} m^-3 ({bc_origin})")
-            print(f"[nondim] dne/dx(x_inner)  = {dne_dx_inner_val:.3e} m^-4 ({bc_origin})")
+            print(nebcs.describe(prefix="[nondim] "))
             print(f"[nondim] hat_ne(0)        = {hat_ne_x0}")
-            print(f"[nondim] hat_ne(-1)       = {hat_ne_inner:.3e}")
             print(f"[nondim] hat_nFC(0)       = {hat_nFC_x0:.3e}")
             print(f"[nondim] hat_nCX(0)       = {hat_nCX_x0:.3e}")
-            print(f"[nondim] hat_dne/dxhat(-1)= {hat_dne_dx_inner:.3e}"
-                  f"{' (secant seed only)' if ne_grad_bc_loc == 'outer' else ''}")
-            if ne_grad_bc_loc == "outer":
-                print(f"[nondim] dne/dx(0)        = {dne_dx_outer_val:.3e}"
-                      f" m^-4 ({bc_origin})")
-                print(f"[nondim] hat_dne/dxhat(0) = {hat_dne_dx_outer:.3e}")
+            print(f"[nondim] hat_dne/dxhat    = {hat_dne_dx_bc:.3e}"
+                  f"  ({'ds(1) Neumann' if ne_grad_bc_loc == 'inner' else 'separatrix target + secant seed'})")
 
         # Frozen ETG and NEO contributions in hat-units.
         hat_C_ETG_arr = (
@@ -1477,18 +1788,28 @@ class saarelma_connor_nondim(saarelma_connor):
         # IntervalMesh boundary IDs: 1 = left (hat_x = -1), 2 = right (0).
         # ------------------------------------------------------------------
         hat_ne_x0_c    = Constant(hat_ne_x0)
-        hat_ne_inner_c = Constant(hat_ne_inner)
         hat_nFC_x0_c   = Constant(hat_nFC_x0)
         hat_nCX_x0_c   = Constant(hat_nCX_x0)
-        hat_dne_dx_inner_c = Constant(hat_dne_dx_inner)
+        # ds(1) slope: the prescribed Neumann value in "inner" mode, the
+        # free unknown the secant drives in "outer" mode.
+        # Seed for the "outer"-mode secant.  Zero inner flux is the
+        # natural boundary condition a Galerkin form defaults to, so it is
+        # the neutral starting point and -- unlike seeding from a
+        # pedestal-top gradient -- uses no information the "outer"
+        # pathway forbids.  It is also markedly more robust: r(s) is
+        # discontinuous where the profile switches solution branch, and
+        # approaching from zero avoids straddling that jump.
+        hat_slope_seed = (hat_dne_dx_bc if ne_grad_bc_loc == "inner"
+                          else (0.0 if grad_bc_seed is None
+                                else self._L_nd * float(grad_bc_seed)
+                                     / self._n0_nd))
+        hat_dne_dx_inner_c = Constant(hat_slope_seed)
 
         bcs = [
             DirichletBC(W.sub(0), hat_ne_x0_c,  2),
             DirichletBC(W.sub(1), hat_nFC_x0_c, 2),
             DirichletBC(W.sub(2), hat_nCX_x0_c, 2),
         ]
-        if ne_inner_bc == "dirichlet":
-            bcs.append(DirichletBC(W.sub(0), hat_ne_inner_c, 1))
 
         # ------------------------------------------------------------------
         # KBM treatment dispatch
@@ -1593,7 +1914,7 @@ class saarelma_connor_nondim(saarelma_connor):
             self._fd_cache["hat_dT_dx_fd"],
             self._fd_cache["hat_Si_fd"],
             hat_nFC_curr, hat_nCX_curr,
-            v_e, ne_inner_bc, hat_dne_dx_inner_c,
+            v_e, hat_dne_dx_inner_c,
             hat_A_KBM_bc_term=hat_A_KBM_bc_term,
             hat_B_KBM_bc_term=hat_B_KBM_bc_term,
         )
@@ -1655,7 +1976,7 @@ class saarelma_connor_nondim(saarelma_connor):
             else:
                 self.grad_bc_info = self._shoot_outer_grad_nondim(
                     F, u, bcs, snes_params,
-                    hat_ne_curr, hat_dne_dx_inner_c, hat_dne_dx_outer,
+                    hat_ne_curr, hat_dne_dx_inner_c, hat_dne_dx_bc,
                     float(grad_bc_tol), int(grad_bc_max_it), v,
                 )
 
