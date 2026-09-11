@@ -460,7 +460,11 @@ def build_neutral_initial_guess(model, x_grid, ne_init,
         cumint_desc = cumulative_trapezoid(integrand_init, x_desc, initial=0.0)
         nFC_on_desc = model.nFC_x0 * np.exp(cumint_desc)
     elif nFC_ic == "manual EPEDNN loop":
-        nFC_on_desc = _manual_on_desc(model.nFC_manual)
+        # Previous-iteration FE solutions undershoot to tiny negatives in
+        # the core where n_FC has decayed away; floor them at a small
+        # positive fraction of the separatrix value rather than reject.
+        nFC_on_desc = np.clip(_manual_on_desc(model.nFC_manual),
+                              1e-15 * model.nFC_x0, None)
     else:
         raise ValueError(
             f"Unknown nFC_ic={nFC_ic!r}; expected 'solve' or "
@@ -505,7 +509,9 @@ def build_neutral_initial_guess(model, x_grid, ne_init,
     elif nCX_ic == "scale nFC":
         nCX_init = nFC_init * model.nCX_x0 / model.nFC_x0
     elif nCX_ic == "manual EPEDNN loop":
-        nCX_init = _scatter(_manual_on_desc(model.nCX_manual))
+        # Same floor as the manual n_FC branch, relative to nCX_x0.
+        nCX_init = _scatter(np.clip(_manual_on_desc(model.nCX_manual),
+                                    1e-15 * model.nCX_x0, None))
     else:
         raise ValueError(
             f"Unknown nCX_ic={nCX_ic!r}; expected 'solve', 'scale nFC' or "
