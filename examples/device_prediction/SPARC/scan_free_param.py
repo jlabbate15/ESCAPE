@@ -33,11 +33,11 @@ from src.solver_nondim import saarelma_connor_nondim
 
 # ── Scan grid ────────────────────────────────────────────────────────────────
 N = 3
-alpha_crits = np.logspace(-1, 1, N)
-C_KBMs = np.logspace(-1, 1, N)
-De_chie_etgs = np.logspace(-1, 1, N)
-nFC_x0s = np.logspace(15, 17, 3)
-ncx_x0_ratios = np.logspace(0.1, 1.25, N)
+alpha_crits = np.logspace(-1, 1, 1)
+C_KBMs = np.array([0.0])
+De_chie_etgs = np.logspace(-3, -2, 2)
+nFC_x0s = np.logspace(14.5, 16.5, N)
+ncx_x0_ratios = np.array([0.1,1,10,20])
 psi_val = 0.85
 x_res = 50
 verbose = False

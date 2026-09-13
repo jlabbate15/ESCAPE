@@ -70,7 +70,7 @@ P_tot_e = (P_ohmic + P_RF) / 2
 # Parameters for ESCAPE #
 
 # Output directory
-output_dir = f'SPARC_workflow'
+output_dir = f'SPARC_workflow_noKBM_lessETG'
 Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 # Scan parameters
@@ -84,17 +84,19 @@ picard_gate_mode = "average"
 picard_max_it = 50
 picard_rtol = 1e-8
 picard_relax = 1.0
+EPEDNN_core = 'stiff T_e and n_e'
 verbose_EPEDNNloop = False
 verbose_sc = False
 
 
 import itertools
 
-alpha_crits = np.array([0.01,2,10])
-nFC_x0s = np.logspace(14.5, 16.5, 4)
-C_KBMs = np.linspace(0.1, 1, 3)
-De_chie_etgs = np.linspace(0.1, 1, 3)
-ncx_x0_ratios = np.array([0.1, 1.0, 10.0, 20.0])
+N = 3
+alpha_crits = np.logspace(-1, 1, 1)
+C_KBMs = np.array([0.0])
+De_chie_etgs = np.logspace(-3, -2, N)
+nFC_x0s = np.logspace(14.5, 16.5, N)
+ncx_x0_ratios = np.array([0.1,1,10,20])
 
 # ne_x0s = [None, 1e20, 2e20] # m^-3, manually specify outer bc for electron density
 ne_x0s = [None] # m^-3, manually specify outer bc for electron density
@@ -140,6 +142,7 @@ for ne_x0 in ne_x0s:
                 picard_relax = picard_relax,
                 ig = 'manual',
                 epednn_model = epednn_model,
+                EPEDNN_core = EPEDNN_core,
                 verbose = verbose_EPEDNNloop,
                 verbose_sc = verbose_sc,
             )

@@ -22,9 +22,10 @@ from OpenFUSIONToolkit.TokaMaker.util import create_isoflux, read_eqdsk
 from examples.device_prediction.helper_functions import read_sparcpublic_profiles, psi_n_and_rho_psi, build_manual_profs, calc_pressure_profile, _print_profile_summary, read_popcon, _to_watts
 
 
-equil_num = 4
-equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
-output_dir = f'DIIIDSnyder_ESCAPE_KBM'
+equil_num = None # None for all
+# equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
+equil_list = None
+output_dir = f'DIIIDSnyder_ESCAPE_noKBM_stiff'
 Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 
@@ -142,6 +143,7 @@ def read_omfitnc_profiles(kprof_fp):
 # Scan parameters
 x_res = 50
 epednn_model = 'EPED1' # 'EPED1' or 'EPED_SPARC'
+EPEDNN_core = 'stiff T_e and n_e'
 eped_tol_max = 1e-5
 eped_iter_max = 5
 kbm_treatment = "picard"
@@ -162,7 +164,7 @@ import itertools
 # ncx_x0_ratios = np.array([0.01,0.5])
 alpha_crits = np.array([0.01])
 nFC_x0s = np.array([1e15])
-C_KBMs = np.array([0.3])
+C_KBMs = np.array([0.0])
 De_chie_etgs = np.array([0.5])
 ncx_x0_ratios = np.array([15])
 
@@ -231,6 +233,7 @@ for mhd_fp, kprof_fp in equilibria:
                     picard_relax = picard_relax,
                     ig = 'manual',
                     epednn_model = epednn_model,
+                    EPEDNN_core = EPEDNN_core, 
                     verbose = verbose_EPEDNNloop,
                     verbose_sc = verbose_sc,
                 )
