@@ -3132,20 +3132,18 @@ class saarelma_connor:
         # print(f'bt: {self.bt}')
 
 
-    def feed_epednn(self, model='EPED1', ne_ped=None, x_ne=None, psiN_Te=None, Te_prev=None, EPEDNN_core='pfile', pres_gfile=False, Z_eff=None, neped_value=None):
+    def feed_epednn(self, model='EPED1', ne_ped=None, x_ne=None, psiN_Te=None, Te_prev=None, EPEDNN_core='pfile', pres_gfile=False, Z_eff=None, neped_value=None, neped_x_loc=None):
         """Feed the Saarelma-Connor solution to the EPEDNN model
 
-        neped_value : float, optional
-            Pedestal density handed to EPEDNN, in 10^19 m^-3. When given it is
-            used verbatim instead of interpolating ``ne_ped`` at ``x_inner``,
-            so the caller can pick where (and from which profile) neped is
-            sampled without disturbing the ``ne_ped``/``x_ne`` pair that
-            ``calc_betan`` stitches into the volume-averaged pressure.
+           ne_ped: array
+           Array of density values in the pedestal
+
+           neped_value: float
+           Single value to feed to EPEDNN as the neped value
         """
         # ne_ped is the entire pedestal profile here, not just the pedestal density height
         
         # Define inputs in Python
-        # These map exactly to the InputEPED struct we saw in the Julia code
         if ne_ped is None:
             self._neped = interp1d(self.x_sol, self.ne_sol, kind='linear', bounds_error=False, fill_value='extrapolate')(self.x_inner) / (1e19) # m^-3 -> 10^19 m^-3
             self._x_ne = self.x_sol
@@ -3153,7 +3151,6 @@ class saarelma_connor:
             self._neped = ne_ped
             if x_ne is None:
                 print('Warning: Most functionalities require x_ne to be provided if ne_ped is provided')
-                # assert False, 'x_ne must be provided if ne_ped is provided'
                 self._x_ne = None
             else:
                 self._x_ne = x_ne
@@ -3162,6 +3159,8 @@ class saarelma_connor:
 
         if neped_value is not None:
             ne_ped_h = float(neped_value)  # already in 10^19 m^-3
+        elif neped_x_loc is not None: # this is the route that profiles_loop_solve.py takes
+            ne_ped_h = interp1d(self._x_ne, self._neped, kind='linear', bounds_error=False, fill_value='extrapolate')(neped_x_loc) / (1e19) # m^-3 -> 10^19 m^-3
         elif self._x_ne is None:
             ne_ped_h = self._neped
         else:

@@ -14,16 +14,15 @@ import itertools
 
 
 # Output directory
-output_dir = 'ARC_workflow_noKBM'
+output_dir = 'ARC_workflow_noKBM_ETG05_large'
 Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 # Free parameters
-N = 3
 alpha_crits = np.logspace(-1, 1, 1)
 C_KBMs = np.array([0.0])
-De_chie_etgs = np.logspace(-1, 0, N)
-nFC_x0s = np.logspace(14.5, 16.5, N)
-ncx_x0_ratios = np.array([0.1,1,10,20])
+De_chie_etgs = np.array([0.5])
+nFC_x0s = np.logspace(14.5, 17.0, 5)
+ncx_x0_ratios = np.array([0.1,1,10,20,30])
 
 # geqdsk
 mhd_fp = '../geqdsk-ARCv3a'
@@ -85,9 +84,10 @@ manual_profs = {
 
 # Parameters for ESCAPE #
 x_res = 50
+solver_structure = "firedrake"
 epednn_model = 'EPED1' # 'EPED1' or 'EPED_SPARC'
 eped_tol_max = 1e-5
-eped_iter_max = 5
+eped_iter_max = 15
 EPEDNN_core = 'stiff T_e and n_e'
 kbm_treatment = "picard"
 kbm_gate_eps = 0.1
@@ -95,6 +95,7 @@ picard_gate_mode = "average"
 picard_max_it = 50
 picard_rtol = 1e-8
 picard_relax = 1.0
+ne_grad_bc_loc = "inner"
 verbose_EPEDNNloop = False
 verbose_sc = False
 
@@ -124,6 +125,8 @@ for combo in itertools.product(alpha_crits, C_KBMs, De_chie_etgs, nFC_x0s, ncx_x
             species = 'D-T',
             # Z_i = Zeff,
             x_res = x_res,
+            solver_structure = solver_structure,
+            ne_grad_bc_loc = ne_grad_bc_loc,
             free_params = free_params,
             eped_tol_max = eped_tol_max,
             eped_iter_max = eped_iter_max,

@@ -11,8 +11,8 @@ from scipy.interpolate import interp1d
 
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
-
 from src.solver_nondim import saarelma_connor_nondim
+from src.ped_width_proxy import ped_width
 
 def profiles_loop_solve(
     MHD_FP = None,
@@ -21,6 +21,8 @@ def profiles_loop_solve(
     manual_profs = None,
     out_dir = None,
     ne_inner_bc = "neumann",
+    ne_grad_bc_loc = "inner",
+    solver_structure = "firedrake", 
     x_res = 40,
     P_tot_e = 5e6, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
     species = 'D',
@@ -124,8 +126,10 @@ def profiles_loop_solve(
     # Setup solver parameters
     SOLVE_KW = dict(
         x_res=x_res,
+        solver_structure=solver_structure,
         fe_degree=2,
         ne_inner_bc=ne_inner_bc,   # Saarelma A7 default; see dirichlet comparison below
+        ne_grad_bc_loc=ne_grad_bc_loc,
         linear_solver="lu",      # or "gamg" for GMRES + algebraic multigrid on J
         kbm_treatment=kbm_treatment,
         kbm_gate_eps=kbm_gate_eps, # 1e-3 minimum
@@ -227,10 +231,16 @@ def profiles_loop_solve(
         if eped_iter == 0:
             pedestal_height_prev = 0.0
             pedestal_width_prev = 0.0
-            pedestal_height, pedestal_width, betan = base_model.feed_epednn(model=epednn_model, ne_ped=best_ne, x_ne=best_x, EPEDNN_core='pfile', Z_eff=Z_eff)    
+
+            pw = ped_width(best_x, best_ne)
+
+            pedestal_height, pedestal_width, betan = base_model.feed_epednn(model=epednn_model, ne_ped=best_ne, x_ne=best_x, EPEDNN_core='pfile', Z_eff=Z_eff, neped_x_loc=0-pw)    
         else:
             pedestal_height_prev, pedestal_width_prev = pedestal_height, pedestal_width
-            pedestal_height, pedestal_width, betan = base_model.feed_epednn(model=epednn_model, ne_ped=best_ne, x_ne=best_x, psiN_Te=psi_N_Te_new, Te_prev=T_prof_keV * 1e3, EPEDNN_core=EPEDNN_core, Z_eff=Z_eff)
+
+            pw = psi_to_x(1 - pedestal_width_prev)
+
+            pedestal_height, pedestal_width, betan = base_model.feed_epednn(model=epednn_model, ne_ped=best_ne, x_ne=best_x, psiN_Te=psi_N_Te_new, Te_prev=T_prof_keV * 1e3, EPEDNN_core=EPEDNN_core, Z_eff=Z_eff, neped_x_loc=pw)
         tanh_width_new = psi_to_x(1-pedestal_width) * -1 # will error if result if negative which should not happen
         print(f"Pedestal height: {pedestal_height} MPa, Pedestal width: {pedestal_width} (psi_N)")
 
@@ -239,8 +249,6 @@ def profiles_loop_solve(
             print(f"Normalized pedestal pressure height and width tolerance: {eped_tol}")
             sol['loop_tol'] = eped_tol
             # np.save(f'{equil_dir}/ne_and_Te_iter_{eped_iter}.npy', sol, allow_pickle=True)
-            if abs(eped_tol) < eped_tol_max:
-                break
         # else:
         #     np.save(f'{equil_dir}/ne_and_Te_iter_{eped_iter}.npy', sol, allow_pickle=True)
 
@@ -341,6 +349,9 @@ def profiles_loop_solve(
                 'ls': '-',
             })
 
+        if abs(eped_tol) < eped_tol_max:
+            break
+        
         # MAKE THIS PART FASTER
         x_to_psiN = interp1d(x_grid_full, psi_N_pres, kind='linear',
                         bounds_error=False, fill_value='extrapolate')

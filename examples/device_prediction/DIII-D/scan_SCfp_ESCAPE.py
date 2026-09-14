@@ -25,7 +25,7 @@ from examples.device_prediction.helper_functions import read_sparcpublic_profile
 equil_num = None # None for all
 # equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
 equil_list = None
-output_dir = f'DIIIDSnyder_ESCAPE_noKBM_stiff'
+output_dir = f'DIIIDSnyder_ESCAPE_noKBM_ETG05_pwfix_outer'
 Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 
@@ -142,16 +142,18 @@ def read_omfitnc_profiles(kprof_fp):
 
 # Scan parameters
 x_res = 50
+solver_structure = "firedrake"
 epednn_model = 'EPED1' # 'EPED1' or 'EPED_SPARC'
 EPEDNN_core = 'stiff T_e and n_e'
 eped_tol_max = 1e-5
-eped_iter_max = 5
+eped_iter_max = 200
 kbm_treatment = "picard"
 kbm_gate_eps = 0.1
 picard_gate_mode = "average"
 picard_max_it = 50
 picard_rtol = 1e-8
 picard_relax = 1.0
+ne_grad_bc_loc = "outer"
 verbose_EPEDNNloop = False
 verbose_sc = False
 
@@ -221,7 +223,9 @@ for mhd_fp, kprof_fp in equilibria:
                     Z_i = Zeff,
                     out_dir = out_dir,
                     x_res = x_res,
+                    solver_structure = solver_structure,
                     ne_x0 = ne_x0,
+                    ne_grad_bc_loc = ne_grad_bc_loc,
                     free_params = free_params,
                     eped_tol_max = eped_tol_max,
                     eped_iter_max = eped_iter_max,
