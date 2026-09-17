@@ -11,7 +11,7 @@ from scipy.interpolate import interp1d
 
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.solver_nondim import saarelma_connor_nondim
+from src.solver_api import saarelma_connor
 from src.ped_width_proxy import ped_width
 
 def profiles_loop_solve(
@@ -22,7 +22,8 @@ def profiles_loop_solve(
     out_dir = None,
     ne_inner_bc = "neumann",
     ne_grad_bc_loc = "inner",
-    solver_structure = "firedrake", 
+    model = "3D",
+    solver_structure = "firedrake",
     x_res = 40,
     P_tot_e = 5e6, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
     species = 'D',
@@ -61,6 +62,18 @@ def profiles_loop_solve(
         Path to directory to save successful solutions from the Saarelma-Connor model.
     ne_inner_bc : str
         Boundary condition for the electron density at the inner boundary.
+        Only used by the '3D' model.
+    model : {'3D', '1D'}
+        Which Saarelma-Connor model the loop solves each iteration.
+        '3D' is the coupled three-equation system (n_e, n_FC, n_CX);
+        '1D' is the original single-equation model for n_e, whose n_FC /
+        n_CX are then derived from the converged n_e.  This counts
+        equations, not spatial dimensions -- both are 1D in space.
+        The kwargs that only one model accepts are added to SOLVE_KW
+        conditionally below; the rest of the loop is model-agnostic
+        because both solvers return the same result dictionary.
+    solver_structure : {'firedrake', 'scipy'}
+        Discretisation backend, applies to either model.
     x_res : int
         Number of grid points in the radial direction.
     P_tot_e : float
@@ -123,24 +136,37 @@ def profiles_loop_solve(
     nFC_x0 = free_params['nFC_x0']
     ncx_x0_ratio = free_params['ncx_x0_ratio']
 
-    # Setup solver parameters
+    # Setup solver parameters.  Both models share the keys below; the ones
+    # only one model (or one backend) accepts are added after, because
+    # `solve()` rejects a kwarg its target cannot take rather than silently
+    # dropping it.
     SOLVE_KW = dict(
         x_res=x_res,
         solver_structure=solver_structure,
-        fe_degree=2,
-        ne_inner_bc=ne_inner_bc,   # Saarelma A7 default; see dirichlet comparison below
         ne_grad_bc_loc=ne_grad_bc_loc,
-        linear_solver="lu",      # or "gamg" for GMRES + algebraic multigrid on J
-        kbm_treatment=kbm_treatment,
-        kbm_gate_eps=kbm_gate_eps, # 1e-3 minimum
-        picard_gate_mode=picard_gate_mode,
         picard_max_it=picard_max_it,
         picard_rtol=picard_rtol,
         picard_relax=picard_relax,
         verbose=verbose_sc,
     )
 
-    base_model = saarelma_connor_nondim(
+    if solver_structure == "firedrake":
+        SOLVE_KW.update(
+            fe_degree=2,
+            linear_solver="lu",  # or "gamg" for GMRES + algebraic multigrid on J
+        )
+
+    if model == "3D":
+        # The neutrals are unknowns only in the coupled system, so the KBM
+        # gate treatment and the inner-BC switch belong to it alone.
+        SOLVE_KW.update(
+            ne_inner_bc=ne_inner_bc,   # Saarelma A7 default; see dirichlet comparison below
+            kbm_treatment=kbm_treatment,
+            kbm_gate_eps=kbm_gate_eps, # 1e-3 minimum
+            picard_gate_mode=picard_gate_mode,
+        )
+
+    base_model = saarelma_connor(
             P_tot_e      = P_tot_e,
             species      = species,
             alpha_crit   = alpha_crit,
@@ -154,10 +180,8 @@ def profiles_loop_solve(
             kprof_fp     = KPROF_FP,
             kprof_loc    = kprof_loc,
             verbose      = verbose_sc,
-            manual_profs = manual_profs, # only used if kprof_loc is set so they are
-            # psi_N_inner_boundary = 0.85, # set to None to use adaptive inner boundary method
+            manual_profs = manual_profs,
     )
-    psi_N_inner_boundary_new = psi_N_inner
     base_model.setup_epednn(model=epednn_model)
     print("Base model built.")
 
@@ -184,30 +208,37 @@ def profiles_loop_solve(
         print("------------------------------------------------")
         print(f"ESCAPE Loop Iter {eped_iter}")
 
-        # Run solver and save outputs
+        # Run solver and save outputs.  bc_origin / initial_guess apply to
+        # both models (both route them through bc_ig_helpers, "manual EPEDNN
+        # loop" included); nCX_ic / nFC_ic are neutral initial conditions, so
+        # they only mean something when the neutrals are unknowns ('3D').
         if eped_iter == 0:
             SOLVE_KW['bc_origin'] = "p-file"
             SOLVE_KW['initial_guess'] = "tanh"
-            SOLVE_KW['nCX_ic'] = "scale nFC"
-            SOLVE_KW['nFC_ic'] = "solve"
+            neutral_ic = {'nCX_ic': "scale nFC", 'nFC_ic': "solve"}
         elif eped_iter > 0 and ig=='solve': # bc
             SOLVE_KW['bc_origin'] = "manual EPEDNN loop"
-            SOLVE_KW['initial_guess'] = "tanh" 
-            SOLVE_KW['nCX_ic'] = "solve"
-            SOLVE_KW['nFC_ic'] = "solve"
+            SOLVE_KW['initial_guess'] = "tanh"
+            neutral_ic = {'nCX_ic': "solve", 'nFC_ic': "solve"}
         elif eped_iter > 0 and ig=='manual': # bc+ig
             SOLVE_KW['bc_origin'] = "manual EPEDNN loop"
             SOLVE_KW['initial_guess'] = "manual EPEDNN loop" # use previous loop's profiles as initial guess for ne, nFC, nCX
-            SOLVE_KW['nCX_ic'] = "manual EPEDNN loop"
-            SOLVE_KW['nFC_ic'] = "manual EPEDNN loop"
+            neutral_ic = {'nCX_ic': "manual EPEDNN loop", 'nFC_ic': "manual EPEDNN loop"}
         elif eped_iter > 0 and ig=='fix': # fix; only T changes, the densities are fixed from the pfile
             SOLVE_KW['bc_origin'] = "p-file"
             SOLVE_KW['initial_guess'] = "tanh"
-            SOLVE_KW['nCX_ic'] = "solve"
-            SOLVE_KW['nFC_ic'] = "solve"
+            neutral_ic = {'nCX_ic': "solve", 'nFC_ic': "solve"}
         else:
             raise ValueError(f"Invalid initial guess mode: {ig}")
-        x_sol, ne_sol, nFC_sol, nCX_sol, T_e_pres, psi_N_pres = base_model.solve_coupled_nondim(tanh_width=tanh_width_new, **SOLVE_KW) # tanh_width only used if initial_guess='tanh'
+        if model == "3D":
+            SOLVE_KW.update(neutral_ic)
+
+        # Both models return the same schema, so the parse below is identical
+        # for either one.  tanh_width is only used if initial_guess='tanh'.
+        res = base_model.solve(model=model, tanh_width=tanh_width_new, **SOLVE_KW)
+        x_sol, ne_sol = res['x'], res['ne']
+        nFC_sol, nCX_sol = res['nFC'], res['nCX']
+        T_e_pres, psi_N_pres = res['T_e_pres'], res['psi_N_pres']
         # x -> psi_N on the density solution grid (for output only; same map as below)
         psi_N_ne = interp1d(np.asarray(base_model.r_psi, dtype=float) - float(base_model.r_psi[-1]),
                             np.asarray(base_model.psi_N_pres, dtype=float),
@@ -248,9 +279,7 @@ def profiles_loop_solve(
             eped_tol = abs((pedestal_height - pedestal_height_prev) / pedestal_height_prev) + abs((pedestal_width - pedestal_width_prev) / pedestal_width_prev)
             print(f"Normalized pedestal pressure height and width tolerance: {eped_tol}")
             sol['loop_tol'] = eped_tol
-            # np.save(f'{equil_dir}/ne_and_Te_iter_{eped_iter}.npy', sol, allow_pickle=True)
-        # else:
-        #     np.save(f'{equil_dir}/ne_and_Te_iter_{eped_iter}.npy', sol, allow_pickle=True)
+
 
         # --- New T_e profile (EPED1 tanh form, Eq. 1b without core H term) ---
         #   T(psi) = T_sep + aT0 * { tanh[2(1 - psi_mid)/Delta]
@@ -292,8 +321,6 @@ def profiles_loop_solve(
         psi_N_Te_new = np.concatenate([psi_prev[keep], psi_tanh])
         T_prof_keV = np.concatenate([Te_prev_keV[keep] + T_e_offset, Te_tanh_eV / 1e3])
 
-        # psi_N_inner_boundary_new = psi_ped
-
         # Store the EPEDNN-generated T_e profile (and the quantities that set it)
         # on `sol` and re-save, so downstream plotting can see the profile this
         # iteration produced rather than only the profile it was fed.
@@ -304,18 +331,15 @@ def profiles_loop_solve(
         sol['psi_ped'] = float(psi_ped)
         sol['pedestal_height'] = float(pedestal_height)
         sol['pedestal_width'] = float(pedestal_width)
+        # Record which model / backend produced this iteration, so a saved
+        # scan can be read back without guessing from the caller's script.
+        sol['model'] = res['model']
+        sol['solver_structure'] = res['solver_structure']
+        sol['diagnostics'] = res['diagnostics']
         np.save(f'{equil_dir}/ne_and_Te_iter_{eped_iter}.npy', sol, allow_pickle=True)
 
         if verbose:  # collect profile data for post-loop plotting
             Te_spliced_eV = T_prof_keV * 1e3
-            # print(f"  Te_ped = {Te_ped_eV:.1f} eV, T_sep = {T_sep_eV:.1f} eV "
-            #       f"(ne_ped = {ne_ped_val:.3e} m^-3, psi_ped = {psi_ped:.4f}, "
-            #       f"Delta = {Delta:.4f})")
-            # print(f"  psi_N_inner_boundary_new = {psi_N_inner_boundary_new:.4f}")
-            # og_Te_peak = float(interp1d(psi_prev, Te_prev_keV * 1e3, kind='linear',
-            #                             bounds_error=False, fill_value='extrapolate')(psi_ped))
-            # print(f"Percent change from previous T_e at psi_ped = "
-            #       f"{(100*(Te_ped_eV - og_Te_peak) / og_Te_peak):.4f}")
 
             if eped_iter == 0:
                 te_plot_profiles.append({
@@ -349,8 +373,9 @@ def profiles_loop_solve(
                 'ls': '-',
             })
 
-        if abs(eped_tol) < eped_tol_max:
-            break
+        if eped_iter > 0:
+            if abs(eped_tol) < eped_tol_max:
+                break
         
         # MAKE THIS PART FASTER
         x_to_psiN = interp1d(x_grid_full, psi_N_pres, kind='linear',
@@ -366,7 +391,7 @@ def profiles_loop_solve(
             'psi_N_n': psi_N_ne[sort_idx],
         }
         if ig == 'manual' or ig == 'solve':
-            base_model = saarelma_connor_nondim( # reset base_model to the new T_e profile and define new "p-file" profiles from the manual profiles
+            base_model = saarelma_connor( # reset base_model to the new T_e profile and define new "p-file" profiles from the manual profiles
                 P_tot_e      = P_tot_e,
                 species      = species,
                 alpha_crit   = alpha_crit,
@@ -382,7 +407,7 @@ def profiles_loop_solve(
                 psi_N_inner_boundary = psi_N_inner,
             )
         elif ig == 'fix':
-            base_model = saarelma_connor_nondim( # reset base_model to the new T_e profile and use the p-file n_e
+            base_model = saarelma_connor( # reset base_model to the new T_e profile and use the p-file n_e
                 P_tot_e      = P_tot_e,
                 species      = species,
                 alpha_crit   = alpha_crit,

@@ -79,12 +79,14 @@ prescribed dn_e/dx.
     the Picard loop and the analytic-neutral path untouched.
     Diagnostics land in ``self.grad_bc_info``.
 
-Solver entry point: ``saarelma_connor_nondim.solve_coupled(...)`` --
-identical signature to the parent class's :meth:`solve_coupled`.
+Solver entry point: ``saarelma_connor.solve_coupled_nondim(...)``, or
+equivalently ``saarelma_connor.solve(model='3D', ...)``.  Both return the
+common result dictionary described in
+:meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
 
-This module subclasses :class:`src.solver.saarelma_connor` so all
-equilibrium / kinetic / cross-section setup is inherited unchanged.
-``src/solver.py`` is left untouched.
+This module contributes :class:`NondimSolverMixin` to the single public
+class :class:`src.solver_api.saarelma_connor`; all equilibrium / kinetic /
+cross-section setup comes from :class:`src.solver.SaarelmaConnorBase`.
 """
 
 import warnings
@@ -106,7 +108,6 @@ except Exception as _firedrake_import_err:
     _FIREDRAKE_AVAILABLE = False
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
-from src.solver import saarelma_connor
 from src import bc_ig_helpers as bcig
 
 
@@ -114,12 +115,17 @@ from src import bc_ig_helpers as bcig
 _EV2J = 1.60218e-19
 
 
-class saarelma_connor_nondim(saarelma_connor):
-    """Drop-in non-dimensional variant of :class:`saarelma_connor`.
+class NondimSolverMixin:
+    """Non-dimensional coupled three-equation solver ("3D" model).
 
-    The constructor signature is identical to the parent class.  The only
-    public method that is re-implemented is :meth:`solve_coupled`, which
-    assembles and solves the dimensionless residuals derived in
+    A mixin over :class:`src.solver.SaarelmaConnorBase`; it is combined
+    with the base and :class:`src.solver_sc.SCSolverMixin` into the single
+    public :class:`src.solver_api.saarelma_connor`.  It defines no
+    ``__init__`` -- every attribute it reads is set by the base
+    constructor -- and it overrides nothing, so it only ever adds the
+    ``*_nondim`` methods below.
+
+    The solver assembles and solves the dimensionless residuals derived in
     Appendix~A.8 of the paper rather than their SI counterparts.
 
     Reference scales are computed lazily inside :meth:`solve_coupled`
@@ -996,8 +1002,10 @@ class saarelma_connor_nondim(saarelma_connor):
 
         Returns
         -------
-        x_sol, ne_sol, nFC_sol, nCX_sol, T_e_pres, psi_N_pres
-            Same tuple as :meth:`solve_coupled_nondim`, in SI units.
+        dict
+            The same result schema as :meth:`solve_coupled_nondim`, in SI
+            units -- see
+            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
         """
         v = self.verbose if verbose is None else bool(verbose)
         force_setup = not reuse_setup
@@ -1247,8 +1255,7 @@ class saarelma_connor_nondim(saarelma_connor):
                 f"  n_CX in [{self.nCX_sol.min():.3e}, {self.nCX_sol.max():.3e}] m^-3"
             )
 
-        return (self.x_sol, self.ne_sol, self.nFC_sol, self.nCX_sol,
-                self.T_e_pres, self.psi_N_pres)
+        return self._build_result_dict('3D', 'scipy')
 
     # ------------------------------------------------------------------
     # Driver
@@ -1467,6 +1474,12 @@ class saarelma_connor_nondim(saarelma_connor):
         ``n_neutral_sub`` : int, default 4001
             Number of sub-grid points for the analytic neutral solve.
             Choose so that L / n_neutral_sub << min(lambda).
+
+        Returns
+        -------
+        dict
+            The common solver result schema, in SI units -- see
+            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
         """
         if not _FIREDRAKE_AVAILABLE:
             raise ImportError(
@@ -2070,4 +2083,16 @@ class saarelma_connor_nondim(saarelma_connor):
                 f"  hat_n_CX in [{self.hat_nCX_sol.min():.3e}, {self.hat_nCX_sol.max():.3e}]"
             )
 
-        return self.x_sol, self.ne_sol, self.nFC_sol, self.nCX_sol, self.T_e_pres, self.psi_N_pres
+        return self._build_result_dict('3D', 'firedrake')
+
+
+def __getattr__(name):
+    """Resolve the pre-refactor class name to the assembled class.
+
+    Deferred rather than a top-level import: ``solver_api`` imports this
+    module, so binding the name at import time would be a cycle.
+    """
+    if name == 'saarelma_connor_nondim':
+        from src.solver_api import saarelma_connor
+        return saarelma_connor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

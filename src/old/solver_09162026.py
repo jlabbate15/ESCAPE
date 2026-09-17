@@ -1,5 +1,4 @@
 import os
-import inspect
 import numpy as np
 from scipy.interpolate import RectBivariateSpline, interp1d
 from scipy.integrate import simpson, solve_bvp, cumulative_trapezoid
@@ -23,7 +22,7 @@ except Exception as _firedrake_import_err:  # raise an error if Firedrake is not
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
 
-class SaarelmaConnorBase:
+class saarelma_connor:
     """
 
     Description
@@ -1404,7 +1403,7 @@ class SaarelmaConnorBase:
                 arr[:] = interp1d(self.psi_N_pres[valid], arr[valid],
                                   kind='linear', bounds_error=False,
                                   fill_value='extrapolate')(self.psi_N_pres)
-    
+
     def non_dimensionalize(self, x, y, L=None, n0=None):
         """Non-dimensionalize the BVP variables.
 
@@ -1448,150 +1447,151 @@ class SaarelmaConnorBase:
         self.N_guess = np.vstack([N, dNdxi])
 
         self.dNdxi_neginf = self.dne_dx_neginf * (L / n0)
-    '''
+
+
     def first_step(self,resolution=200):
-    # #     """Solve Equation (16) in S. Saarelma et al 2023 Nucl. Fusion 63 052002
-    # #     This is the simplified BVP (no charge-exchange neutrals) used as the
-    # #     initial guess for the full iterative solve of Equation (15).
+    #     """Solve Equation (16) in S. Saarelma et al 2023 Nucl. Fusion 63 052002
+    #     This is the simplified BVP (no charge-exchange neutrals) used as the
+    #     initial guess for the full iterative solve of Equation (15).
 
-    # #     Parameters
-    # #     ----------
-    # #     self : object
-    # #         instance of saarelma_connor class
-    # #     resolution : int, optional
-    # #         number of points to use in the radial grid solve_bvp() call
+    #     Parameters
+    #     ----------
+    #     self : object
+    #         instance of saarelma_connor class
+    #     resolution : int, optional
+    #         number of points to use in the radial grid solve_bvp() call
 
-    # #     Boundary conditions:
-    # #         dn_e/dx = dne_dx_neginf  at x_inner (psi_N adaptively set by
-    # #                                   find_inner_boundary, defaulting to
-    # #                                   psi_N_inner_boundary = 0.85)
-    # #         n_e     = ne_x0          at x = 0   (separatrix)
+    #     Boundary conditions:
+    #         dn_e/dx = dne_dx_neginf  at x_inner (psi_N adaptively set by
+    #                                   find_inner_boundary, defaulting to
+    #                                   psi_N_inner_boundary = 0.85)
+    #         n_e     = ne_x0          at x = 0   (separatrix)
 
-    # #     Uses coefficient interpolators set up by solve() and stored as
-    # #     self._D_ped_x, self._gradr2_x, self._Si_x, self._Scx_x,
-    # #     self._P_x, self._dPdx_x, self._x_inner.
+    #     Uses coefficient interpolators set up by solve() and stored as
+    #     self._D_ped_x, self._gradr2_x, self._Si_x, self._Scx_x,
+    #     self._P_x, self._dPdx_x, self._x_inner.
 
-    # #     Sets
-    # #     ----
-    # #     self.ne_first_sol : BVP solution object from solve_bvp.
-    # #     """
+    #     Sets
+    #     ----
+    #     self.ne_first_sol : BVP solution object from solve_bvp.
+    #     """
 
-    # #     # FIRST set boundary conditions
-    # #     # Adaptively locate the inner boundary where both neutral species
-    # #     # have attenuated below the requested thresholds (no-op when both
-    # #     # thresholds are None, in which case psi_N_inner_boundary is unchanged).
-    # #     if self.psi_N_inner_boundary is None:
-    # #         self.find_inner_boundary()
-    # #     else:
-    # #         self.x_inner = self.psi_N_inner_boundary
+    #     # FIRST set boundary conditions
+    #     # Adaptively locate the inner boundary where both neutral species
+    #     # have attenuated below the requested thresholds (no-op when both
+    #     # thresholds are None, in which case psi_N_inner_boundary is unchanged).
+    #     if self.psi_N_inner_boundary is None:
+    #         self.find_inner_boundary()
+    #     else:
+    #         self.x_inner = self.psi_N_inner_boundary
 
-    # #     # Calculate boundary condition from profiles at psi_N = 0.85
-    # #     # self.n_e_pres = interp1d(self.psi_ne_eval, self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
-    # #     self.dne_dx = np.gradient(self.n_e_pres, self.x_init) # (particles/m^3) / m, electron density gradient
-    # #     dne_dx_interp = interp1d(self.psi_N_pres, self.dne_dx, kind='linear', bounds_error=False, fill_value='extrapolate')
-    # #     self.dne_dx_neginf = dne_dx_interp(self.psi_N_inner_boundary)
+    #     # Calculate boundary condition from profiles at psi_N = 0.85
+    #     # self.n_e_pres = interp1d(self.psi_ne_eval, self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
+    #     self.dne_dx = np.gradient(self.n_e_pres, self.x_init) # (particles/m^3) / m, electron density gradient
+    #     dne_dx_interp = interp1d(self.psi_N_pres, self.dne_dx, kind='linear', bounds_error=False, fill_value='extrapolate')
+    #     self.dne_dx_neginf = dne_dx_interp(self.psi_N_inner_boundary)
 
-    # #     # Physical sanity check: the inner-boundary gradient must be negative.
-    # #     # A zero or positive value means the chosen boundary is inside the flat
-    # #     # core or on a density inversion, which violates the model's assumption
-    # #     # that the pedestal gradient is steeper everywhere inside the domain.
-    # #     if self.dne_dx_neginf >= 0:
-    # #         raise ValueError(
-    # #             f"Inner boundary condition dne/dx = {self.dne_dx_neginf:.3e} m^-4 "
-    # #             f"at psi_N = {self.psi_N_inner_boundary:.4f} is zero or positive. "
-    # #             f"The Neumann BC must be strictly negative (density decreasing "
-    # #             f"outward). The inner boundary may be sitting inside the flat "
-    # #             f"core or on a density inversion. Consider lowering "
-    # #             f"nFC_threshold / nCX_threshold, or increasing "
-    # #             f"psi_N_inner_boundary to move the boundary further outward."
-    # #         )
+    #     # Physical sanity check: the inner-boundary gradient must be negative.
+    #     # A zero or positive value means the chosen boundary is inside the flat
+    #     # core or on a density inversion, which violates the model's assumption
+    #     # that the pedestal gradient is steeper everywhere inside the domain.
+    #     if self.dne_dx_neginf >= 0:
+    #         raise ValueError(
+    #             f"Inner boundary condition dne/dx = {self.dne_dx_neginf:.3e} m^-4 "
+    #             f"at psi_N = {self.psi_N_inner_boundary:.4f} is zero or positive. "
+    #             f"The Neumann BC must be strictly negative (density decreasing "
+    #             f"outward). The inner boundary may be sitting inside the flat "
+    #             f"core or on a density inversion. Consider lowering "
+    #             f"nFC_threshold / nCX_threshold, or increasing "
+    #             f"psi_N_inner_boundary to move the boundary further outward."
+    #         )
 
-    # #     # Set up ODE
-    # #     f0_arr = self.gradr2_fsa * (self.D_NEO + self._D_KBM)
-    # #     f1_arr = self.gradr2_fsa * self.D_ETG_x
+    #     # Set up ODE
+    #     f0_arr = self.gradr2_fsa * (self.D_NEO + self._D_KBM)
+    #     f1_arr = self.gradr2_fsa * self.D_ETG_x
 
-    # #     df0_arr = np.gradient(f0_arr, self.x_prev)
-    # #     df1_arr = np.gradient(f1_arr, self.x_prev)
+    #     df0_arr = np.gradient(f0_arr, self.x_prev)
+    #     df1_arr = np.gradient(f1_arr, self.x_prev)
 
-    # #     f0_x = interp1d(self.x_prev, f0_arr, kind='linear', bounds_error=False, fill_value='extrapolate')
-    # #     df0_dx = interp1d(self.x_prev, df0_arr, kind='linear', bounds_error=False, fill_value='extrapolate')
-    # #     f1_x = interp1d(self.x_prev, f1_arr, kind='linear', bounds_error=False, fill_value='extrapolate')
-    # #     df1_dx = interp1d(self.x_prev, df1_arr, kind='linear', bounds_error=False, fill_value='extrapolate')
+    #     f0_x = interp1d(self.x_prev, f0_arr, kind='linear', bounds_error=False, fill_value='extrapolate')
+    #     df0_dx = interp1d(self.x_prev, df0_arr, kind='linear', bounds_error=False, fill_value='extrapolate')
+    #     f1_x = interp1d(self.x_prev, f1_arr, kind='linear', bounds_error=False, fill_value='extrapolate')
+    #     df1_dx = interp1d(self.x_prev, df1_arr, kind='linear', bounds_error=False, fill_value='extrapolate')
 
-    # #     # x-based interpolators for the ionization and CX rate coefficient profiles
-    # #     S_i_x = interp1d(self.x_prev, self.S_i_pres, kind='linear', bounds_error=False, fill_value='extrapolate')
-    # #     S_cx_x = interp1d(self.x_prev, self.S_cx_pres, kind='linear', bounds_error=False, fill_value='extrapolate')
+    #     # x-based interpolators for the ionization and CX rate coefficient profiles
+    #     S_i_x = interp1d(self.x_prev, self.S_i_pres, kind='linear', bounds_error=False, fill_value='extrapolate')
+    #     S_cx_x = interp1d(self.x_prev, self.S_cx_pres, kind='linear', bounds_error=False, fill_value='extrapolate')
 
-    # #     # Build physical guess, then non-dimensionalize to help solver converge
-    # #     x_grid = np.linspace(self.x_inner, 0, resolution)
-    # #     ne_guess = interp1d(self.x_init, self.n_e_pres, kind='linear',
-    # #                         bounds_error=False, fill_value='extrapolate')(x_grid)
-    # #     dne_guess = np.gradient(ne_guess, x_grid)
-    # #     dne_guess[0] = self.dne_dx_neginf
-    # #     Y_guess = np.vstack([ne_guess, dne_guess])
+    #     # Build physical guess, then non-dimensionalize to help solver converge
+    #     x_grid = np.linspace(self.x_inner, 0, resolution)
+    #     ne_guess = interp1d(self.x_init, self.n_e_pres, kind='linear',
+    #                         bounds_error=False, fill_value='extrapolate')(x_grid)
+    #     dne_guess = np.gradient(ne_guess, x_grid)
+    #     dne_guess[0] = self.dne_dx_neginf
+    #     Y_guess = np.vstack([ne_guess, dne_guess])
 
-    # #     n0_inner = interp1d(self.x_prev, self.n_e_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(x_inner) 
-    # #     self.non_dimensionalize(x=x_grid, y=Y_guess, n0=n0_inner)
-    # #     L = self._L
-    # #     n0 = self._n0
+    #     n0_inner = interp1d(self.x_prev, self.n_e_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(x_inner) 
+    #     self.non_dimensionalize(x=x_grid, y=Y_guess, n0=n0_inner)
+    #     L = self._L
+    #     n0 = self._n0
 
-    # #     def ode(xi, Y):
-    # #         N, dNdxi = Y
-    # #         x = L * xi # map back to physical coordinate for interpolators
+    #     def ode(xi, Y):
+    #         N, dNdxi = Y
+    #         x = L * xi # map back to physical coordinate for interpolators
             
-    # #         f0 = f0_x(x)
-    # #         df0dx = df0_dx(x)
-    # #         f1 = f1_x(x)
-    # #         df1dx = df1_dx(x)
+    #         f0 = f0_x(x)
+    #         df0dx = df0_dx(x)
+    #         f1 = f1_x(x)
+    #         df1dx = df1_dx(x)
             
-    # #         S_i = S_i_x(x)
-    # #         S_cx = S_cx_x(x)
+    #         S_i = S_i_x(x)
+    #         S_cx = S_cx_x(x)
 
-    # #         # Prevent division by zero mathematically if N drops near 0 during BVP iterations
-    # #         N_safe = np.maximum(N, 1e-6)
-    # #         if 1e-6 in N_safe:
-    # #             import warnings
-    # #             warnings.warn(
-    # #                 "N_safe is very close to zero and got clipped to 1e-6",
-    # #                 RuntimeWarning,
-    # #                 stacklevel=2,
-    # #             )
+    #         # Prevent division by zero mathematically if N drops near 0 during BVP iterations
+    #         N_safe = np.maximum(N, 1e-6)
+    #         if 1e-6 in N_safe:
+    #             import warnings
+    #             warnings.warn(
+    #                 "N_safe is very close to zero and got clipped to 1e-6",
+    #                 RuntimeWarning,
+    #                 stacklevel=2,
+    #             )
 
-    # #         # Total flux multiplier
-    # #         F = f0 + (f1 / (n0 * N_safe))
+    #         # Total flux multiplier
+    #         F = f0 + (f1 / (n0 * N_safe))
 
-    # #         # Non-dimensional coefficients
-    # #         C_A = (n0 * L * (S_i + S_cx)) / (abs(self.V_FC) * self.fFC * F)
-    # #         C_B = C_A * self.dNdxi_neginf
-    # #         C_K = (L / F) * (df0dx + (df1dx / (n0 * N_safe)))
-    # #         C_N = f1 / (n0 * (N_safe**2) * F)
+    #         # Non-dimensional coefficients
+    #         C_A = (n0 * L * (S_i + S_cx)) / (abs(self.V_FC) * self.fFC * F)
+    #         C_B = C_A * self.dNdxi_neginf
+    #         C_K = (L / F) * (df0dx + (df1dx / (n0 * N_safe)))
+    #         C_N = f1 / (n0 * (N_safe**2) * F)
 
-    # #         if self.verbose:
-    # #             print('iteration ODE eval')
-    # #             print(f"C_A : {np.max(C_A):.3e}, min: {np.min(C_A):.3e}")
-    # #             print(f"C_B : {np.max(C_B):.3e}, min: {np.min(C_B):.3e}")
-    # #             print(f"C_K : {np.max(C_K):.3e}, min: {np.min(C_K):.3e}")
-    # #             print(f"C_N : {np.max(C_N):.3e}, min: {np.min(C_N):.3e}")
+    #         if self.verbose:
+    #             print('iteration ODE eval')
+    #             print(f"C_A : {np.max(C_A):.3e}, min: {np.min(C_A):.3e}")
+    #             print(f"C_B : {np.max(C_B):.3e}, min: {np.min(C_B):.3e}")
+    #             print(f"C_K : {np.max(C_K):.3e}, min: {np.min(C_K):.3e}")
+    #             print(f"C_N : {np.max(C_N):.3e}, min: {np.min(C_N):.3e}")
                 
-    # #         d2Ndxi2 = C_A * N * dNdxi - C_B * N - C_K * dNdxi + C_N * (dNdxi**2)
-    # #         return np.vstack([dNdxi, d2Ndxi2])
+    #         d2Ndxi2 = C_A * N * dNdxi - C_B * N - C_K * dNdxi + C_N * (dNdxi**2)
+    #         return np.vstack([dNdxi, d2Ndxi2])
 
-    # #     def bc(Ya, Yb):
-    # #         return np.array([
-    # #             Ya[1] - self.dNdxi_neginf,  # Neumann BC at xi = -1
-    # #             Yb[0] - self.ne_x0/n0,      # Dirichlet BC: N = ne/n0 at xi = x = 0 (separatrix)
-    # #         ])
+    #     def bc(Ya, Yb):
+    #         return np.array([
+    #             Ya[1] - self.dNdxi_neginf,  # Neumann BC at xi = -1
+    #             Yb[0] - self.ne_x0/n0,      # Dirichlet BC: N = ne/n0 at xi = x = 0 (separatrix)
+    #         ])
 
-    # #     sol = solve_bvp(ode, bc, self.xi, self.N_guess, max_nodes=5000, verbose=self.bvp_verbose)
-    # #     if not sol.success:
-    # #         raise RuntimeError(f"first_step BVP failed: {sol.message}")
+    #     sol = solve_bvp(ode, bc, self.xi, self.N_guess, max_nodes=5000, verbose=self.bvp_verbose)
+    #     if not sol.success:
+    #         raise RuntimeError(f"first_step BVP failed: {sol.message}")
 
-    # #     # De-normalize back to physical units for downstream use
-    # #     sol.x = L * sol.x
-    # #     sol.y[0] = n0 * sol.y[0]
-    # #     sol.y[1] = (n0 / L) * sol.y[1]
-    # #     self.sol = sol
-    '''
+    #     # De-normalize back to physical units for downstream use
+    #     sol.x = L * sol.x
+    #     sol.y[0] = n0 * sol.y[0]
+    #     sol.y[1] = (n0 / L) * sol.y[1]
+    #     self.sol = sol
+
     def compute_post_solve_SC_neutrals(self):
         """Franck--Condon and charge-exchange densities after ``solve_simplified()``.
 
@@ -1638,8 +1638,7 @@ class SaarelmaConnorBase:
         fc_term = -(Vfc * fFC / (Vcx * fCX)) * ((Si + Scx / 2) / (Si + Scx)) * nFC
         nCX = np.maximum(flux_term + fc_term, 0.0)
         return nFC, nCX
-    
-    '''
+
     def solve_SC(self,soln_method='sc_2order',tol=1e-3,max_iter=50,x_res=100,free_params=None):
     #     """Iteratively solve Equation (15) in S. Saarelma et al 2023 Nucl. Fusion 63 052002
 
@@ -1870,7 +1869,7 @@ class SaarelmaConnorBase:
     #             )
 
     #         return self.x_sol, self.ne_sol, self.dne_dx_sol
-    '''
+
 
     def invalidate_firedrake_cache(self):
         """Drop cached Firedrake meshes, coefficients, and linear solvers.
@@ -2224,7 +2223,6 @@ class SaarelmaConnorBase:
         )
         solve(F == 0, u, bcs=bcs, solver_parameters=newton_params)
 
-    '''
     def solve_coupled(self,
                       x_res=200,
                       fe_degree=2,
@@ -2728,8 +2726,8 @@ class SaarelmaConnorBase:
         self.V_fd = V
 
         return self.x_sol, self.ne_sol, self.nFC_sol, self.nCX_sol
-    
-    '''
+
+
 
     def fsa(self,A,flux_surfaces='T_e'):
         """Flux surface average a quantity as defined by ⟨A⟩= int(R^2Adθ)/ int(R^2dθ) in S. Saarelma et al 2023 Nucl. Fusion 63 052002
@@ -3300,260 +3298,3 @@ class SaarelmaConnorBase:
             assert False, 'specified regime_flag not supported'
 
         return self.pedestal_pressure, self.pedestal_width, self.betan
-
-    # ------------------------------------------------------------------
-    # Unified solver interface
-    # ------------------------------------------------------------------
-    #
-    # `solve()` and `_build_result_dict()` live on the base class, but the
-    # solvers they reach are supplied by the two mixins, so they only work
-    # on the assembled class (`src.solver_api.saarelma_connor`).  Keeping
-    # them here keeps the dispatch and the result schema in one place, next
-    # to the shared setup the two models both rely on.
-
-    #: Public model name -> the solver entry point it dispatches to.
-    _MODEL_ENTRY_POINTS = {
-        '3D': 'solve_coupled_nondim',   # coupled n_e / n_FC / n_CX
-        '1D': 'solve_sc',               # original single-equation n_e model
-    }
-
-    #: Accepted spellings of the model names, lower-cased.
-    _MODEL_ALIASES = {
-        '3d': '3D', 'coupled': '3D', 'nondim': '3D',
-        '1d': '1D', 'sc': '1D', 'simplified': '1D',
-    }
-
-    #: Optional per-solver attributes copied into result['diagnostics'].
-    #: Read with getattr(..., None), so an attribute a given backend never
-    #: sets simply comes back as None.
-    _RESULT_DIAGNOSTIC_ATTRS = (
-        'picard_info', 'kbm_info', 'grad_bc_info',
-        'alpha_bar_ped', 'kbm_gate_on', 'dne_dx_inner_solved',
-        'dne_dx_neginf',
-        'hat_x_sol', 'hat_ne_sol', 'hat_nFC_sol', 'hat_nCX_sol',
-        'E_sol',
-    )
-
-    @classmethod
-    def _normalise_model(cls, model):
-        """Map a user-supplied model name onto ``'1D'`` or ``'3D'``."""
-        key = str(model).strip().lower()
-        try:
-            return cls._MODEL_ALIASES[key]
-        except KeyError:
-            raise ValueError(
-                f"model must be one of '1D' (aliases: 'sc', 'simplified') or "
-                f"'3D' (aliases: 'coupled', 'nondim'); got {model!r}."
-            ) from None
-
-    def _solve_signature_owners(self, model, backend=None):
-        """Methods whose signatures define the kwargs accepted by `model`.
-
-        ``solve_coupled_nondim`` declares every argument of both of its
-        backends explicitly, so it is its own authority.  ``solve_sc`` only
-        forwards ``**kwargs``, so the authority is the concrete backend --
-        and the two differ (``bvp_*`` for scipy, ``fe_degree``/``ksp_*``
-        for Firedrake).  With ``backend=None`` every backend of the model
-        is returned, which is what the "did you mean the other model?"
-        half of the error message needs.
-        """
-        if model == '3D':
-            names = ['solve_coupled_nondim']
-        elif backend is None:
-            names = ['solve_sc_firedrake', 'solve_sc_scipy']
-        else:
-            names = {'firedrake': ['solve_sc_firedrake'],
-                     'scipy': ['solve_sc_scipy']}.get(str(backend).strip().lower())
-            if names is None:
-                raise ValueError(
-                    f"solver_structure must be 'firedrake' or 'scipy' for "
-                    f"model='1D'; got {backend!r}."
-                )
-        return [getattr(self, name) for name in names if hasattr(self, name)]
-
-    def _accepted_solve_kwargs(self, model, backend=None):
-        """Keyword names accepted by `model` (optionally a single backend)."""
-        accepted = set()
-        for method in self._solve_signature_owners(model, backend):
-            for name, param in inspect.signature(method).parameters.items():
-                if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                                  inspect.Parameter.KEYWORD_ONLY):
-                    accepted.add(name)
-        return accepted
-
-    def _check_solve_kwargs(self, model, backend, kwargs):
-        """Reject kwargs the chosen model/backend cannot accept.
-
-        The caller owns the ``SOLVE_KW`` dict it hands to :meth:`solve`, so a
-        stray key has to fail loudly here rather than be silently dropped on
-        the way into a solver that would then quietly use its default.
-        """
-        accepted = self._accepted_solve_kwargs(model, backend)
-        unknown = sorted(set(kwargs) - accepted)
-        if not unknown:
-            return
-
-        other = '1D' if model == '3D' else '3D'
-        other_accepted = self._accepted_solve_kwargs(other)
-        this_model_accepted = self._accepted_solve_kwargs(model)
-
-        detail = []
-        for name in unknown:
-            if name in this_model_accepted:
-                detail.append(f"{name!r} (valid for model={model!r}, but not "
-                              f"with solver_structure={backend!r})")
-            elif name in other_accepted:
-                detail.append(f"{name!r} (belongs to model={other!r})")
-            else:
-                detail.append(f"{name!r} (not an argument of any solver)")
-
-        raise TypeError(
-            f"solve(model={model!r}, solver_structure={backend!r}) got "
-            f"unsupported keyword argument(s): {', '.join(detail)}.\n"
-            f"Accepted here: {', '.join(sorted(accepted))}."
-        )
-
-    def solve(self, model='3D', **kwargs):
-        """Solve the pedestal problem with the chosen physics model.
-
-        One entry point for both models, so callers can switch between them
-        by changing a string rather than the class they instantiate.  Both
-        return the same dictionary schema (see :meth:`_build_result_dict`),
-        so downstream code does not branch either.
-
-        Parameters
-        ----------
-        model : {'3D', '1D'}
-            ``'3D'`` (aliases ``'coupled'``, ``'nondim'``) solves the
-            coupled three-equation system for n_e, n_FC and n_CX via
-            :meth:`solve_coupled_nondim`.  ``'1D'`` (aliases ``'sc'``,
-            ``'simplified'``) solves the original single-equation
-            Saarelma-Connor model for n_e via :meth:`solve_sc`.
-
-            Note this counts *equations*, not spatial dimensions: both
-            models are one-dimensional in space.
-        solver_structure : {'firedrake', 'scipy'}, optional
-            Discretisation backend, default ``'firedrake'``.  Accepted for
-            both models, so a single kwargs dict can drive either;
-            ``implementation`` is accepted as a synonym (it is the name
-            :meth:`solve_sc` uses internally).
-        **kwargs
-            Passed to the chosen solver.  Arguments the target does not
-            accept raise ``TypeError`` naming the offending key rather than
-            being dropped.
-
-        Returns
-        -------
-        dict
-            See :meth:`_build_result_dict`.
-        """
-        model = self._normalise_model(model)
-        kwargs = dict(kwargs)
-
-        # One spelling for the backend across both models: the coupled
-        # solver calls it `solver_structure`, solve_sc calls it
-        # `implementation`.
-        backend = kwargs.pop('solver_structure', None)
-        backend_alias = kwargs.pop('implementation', None)
-        if (backend is not None and backend_alias is not None
-                and backend != backend_alias):
-            raise ValueError(
-                f"solve() got conflicting backends: solver_structure="
-                f"{backend!r} and implementation={backend_alias!r}. Pass one."
-            )
-        if backend is None:
-            backend = backend_alias
-        if backend is None:
-            backend = 'firedrake'
-
-        self._check_solve_kwargs(model, backend, kwargs)
-
-        entry_point = self._MODEL_ENTRY_POINTS[model]
-        try:
-            solver = getattr(self, entry_point)
-        except AttributeError:
-            raise AttributeError(
-                f"{type(self).__name__} has no {entry_point!r}; model="
-                f"{model!r} needs the corresponding solver mixin. Build the "
-                f"model from src.solver_api.saarelma_connor."
-            ) from None
-
-        backend_kw = 'solver_structure' if model == '3D' else 'implementation'
-        return solver(**{backend_kw: backend}, **kwargs)
-
-    def _build_result_dict(self, model, solver_structure):
-        """Assemble the common result dictionary returned by every solver.
-
-        Both models fill the same keys, so callers parse one schema
-        regardless of which solver ran.
-
-        Parameters
-        ----------
-        model : {'1D', '3D'}
-            Which model produced the solution currently on the instance.
-        solver_structure : {'firedrake', 'scipy'}
-            Which backend produced it.
-
-        Returns
-        -------
-        dict
-            ``model``, ``solver_structure`` : str
-
-            ``x`` : ndarray
-                Radial grid (m), zero at the separatrix.
-            ``ne``, ``dne_dx`` : ndarray
-                Electron density (m^-3) and its gradient (m^-4) on ``x``.
-            ``nFC``, ``nCX`` : ndarray
-                Franck-Condon and charge-exchange neutral densities
-                (m^-3) on ``x``.  Solved as unknowns by the 3D model;
-                derived from the converged n_e by the 1D model.
-            ``T_e_pres``, ``psi_N_pres`` : ndarray
-                Electron temperature and normalised flux of the input
-                profiles, passed through for downstream convenience.
-            ``diagnostics`` : dict
-                Per-solver extras (Picard/KBM/shooting info, the
-                non-dimensional profiles); entries the backend never set
-                are ``None``.
-        """
-        x = np.asarray(self.x_sol, dtype=float)
-        ne = np.asarray(self.ne_sol, dtype=float)
-
-        # Branch on `model` rather than on which attributes happen to
-        # exist: solving 1D on an instance that previously ran 3D would
-        # otherwise pick up that run's stale nFC_sol / nCX_sol.
-        if model == '3D':
-            nFC = np.asarray(self.nFC_sol, dtype=float)
-            nCX = np.asarray(self.nCX_sol, dtype=float)
-            # The coupled solver does not carry the gradient as an unknown.
-            dne_dx = np.gradient(ne, x)
-        else:
-            # n_FC and n_CX are not unknowns of the single-equation model;
-            # they follow from the converged n_e via Saarelma Eqs. (11)-(12).
-            # Not compute_post_solve_SC_neutrals(): it assumes the solution
-            # grid matches x_init and omits De_chie_etg from D_ETG.
-            nFC, nCX = self._post_solve_neutrals_sc()
-            nFC = np.asarray(nFC, dtype=float)
-            nCX = np.asarray(nCX, dtype=float)
-            dne_dx = np.asarray(self.dne_dx_sol, dtype=float)
-
-        diagnostics = {name: getattr(self, name, None)
-                       for name in self._RESULT_DIAGNOSTIC_ATTRS}
-
-        self.result = {
-            'model': model,
-            'solver_structure': str(solver_structure),
-            'x': x,
-            'ne': ne,
-            'dne_dx': dne_dx,
-            'nFC': nFC,
-            'nCX': nCX,
-            'T_e_pres': np.asarray(self.T_e_pres, dtype=float),
-            'psi_N_pres': np.asarray(self.psi_N_pres, dtype=float),
-            'diagnostics': diagnostics,
-        }
-        return self.result
-
-
-#: Backwards-compatible alias for the pre-refactor base-class name.  The
-#: full model (base + both solver mixins) is src.solver_api.saarelma_connor.
-saarelma_connor_base = SaarelmaConnorBase

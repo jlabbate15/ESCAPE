@@ -207,15 +207,20 @@ Free parameters: alpha_crit, De_chie_etg, C_KBM, nFC_x0 -- set through
 the parent constructor, through ``update_free_params``, or per solve
 through the ``free_params`` argument of either entry point.
 
-This module subclasses :class:`src.solver.saarelma_connor`, so all
-equilibrium / kinetic / cross-section initialisation is inherited
-unchanged; ``src/solver.py`` is left untouched.
+This module contributes :class:`SCSolverMixin` to the single public class
+:class:`src.solver_api.saarelma_connor`; all equilibrium / kinetic /
+cross-section initialisation comes from
+:class:`src.solver.SaarelmaConnorBase`.
 
 Entry points
 ============
-    saarelma_connor_sc.solve_sc_scipy(...)      -- scipy solve_bvp
-    saarelma_connor_sc.solve_sc_firedrake(...)  -- Firedrake / SNES
-    saarelma_connor_sc.solve_sc(...)            -- thin dispatcher
+    saarelma_connor.solve_sc_scipy(...)      -- scipy solve_bvp
+    saarelma_connor.solve_sc_firedrake(...)  -- Firedrake / SNES
+    saarelma_connor.solve_sc(...)            -- thin dispatcher
+    saarelma_connor.solve(model='1D', ...)   -- unified entry point
+
+All of them return the common result dictionary described in
+:meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
 """
 
 import numpy as np
@@ -233,7 +238,6 @@ except Exception as _firedrake_import_err:
     _FIREDRAKE_AVAILABLE = False
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
-from src.solver import saarelma_connor
 from src import bc_ig_helpers as bcig
 
 
@@ -244,8 +248,15 @@ _EV2J = 1.60218e-19
 _FREE_PARAM_NAMES = ("alpha_crit", "De_chie_etg", "C_KBM", "nFC_x0")
 
 
-class saarelma_connor_sc(saarelma_connor):
-    """Original (implicit) Saarelma-Connor model, non-dimensionalised.
+class SCSolverMixin:
+    """Original (implicit) Saarelma-Connor model, non-dimensionalised ("1D").
+
+    A mixin over :class:`src.solver.SaarelmaConnorBase`; it is combined
+    with the base and :class:`src.solver_nondim.NondimSolverMixin` into the
+    single public :class:`src.solver_api.saarelma_connor`.  It defines no
+    ``__init__`` -- every attribute it reads is set by the base
+    constructor -- and it overrides nothing, so it only ever adds the
+    ``*_sc`` methods below.
 
     Solves the single second-order ODE for n_e only (report Eqs. (6)-(7)
     / Saarelma Eq. 16 and corrected Eq. 15) with the two-step implicit
@@ -254,7 +265,7 @@ class saarelma_connor_sc(saarelma_connor):
         solve_sc_scipy      -- scipy.integrate.solve_bvp
         solve_sc_firedrake  -- Firedrake (CG finite elements, SNES Newton)
 
-    Both share the initialisation machinery of the parent class
+    Both share the initialisation machinery of the base class
     (``setup_solver_grids``, ``form_factor``, ``find_inner_boundary``,
     ``construct_C_ETG``) and the same Picard "average"-gate pedestal
     pressure feature as ``solver_nondim`` (KBM diffusivity refrozen every
@@ -623,6 +634,49 @@ class saarelma_connor_sc(saarelma_connor):
             (Si + 0.5 * Scx) / (Si + Scx)
         )
 
+    def _post_solve_neutrals_sc(self):
+        """<n_FC> and <n_CX> (m^-3) on ``self.x_sol`` from the converged n_e.
+
+        The neutrals are not unknowns of this model, so they are
+        reconstructed after the solve with Saarelma et al. (2023)
+        Eqs. (11)-(12):
+
+            <n_FC> = nFC_x0 * E(x)
+            <n_CX> = max( -<|grad r|^2> D_ped / (|V_CX| f_CX)
+                              * (n_e' - n_e'(-inf))
+                          + (C_CX - 1) <n_FC>,  0 )
+
+        This is the same closure as the base class's
+        ``compute_post_solve_SC_neutrals``, with two differences that make
+        it match what this solver actually solved:
+
+        * every coefficient is interpolated from ``x_init`` onto
+          ``x_sol``, rather than assumed to share its length -- the
+          adaptive ``solve_bvp`` mesh never does;
+        * the ETG part of D_ped is ``C_ETG / n_e``, which carries
+          ``De_chie_etg``, rather than ``D_ETG_x / n_e``, which does not.
+          The two agree only for De_chie_etg = 1.
+
+        D_KBM is the frozen Picard value on ``self._D_KBM``, i.e. the one
+        the final n_e was solved with.
+        """
+        x = np.asarray(self.x_sol, dtype=float)
+        n_e = np.asarray(self.ne_sol, dtype=float)
+        dne_dx = np.asarray(self.dne_dx_sol, dtype=float)
+
+        nFC = self.nFC_x0 * self._exp_kernel_sc(n_e, x)
+
+        g = np.interp(x, self.x_init, self.gradr2_fsa)
+        D_ped = (np.interp(x, self.x_init, self.D_NEO + self._D_KBM)
+                 + np.interp(x, self.x_init, self.C_ETG) / n_e)
+        Vcx = np.interp(x, self.x_init, np.abs(self.V_cx_pres))
+        fCX = np.interp(x, self.x_init, self.fCX)
+
+        flux_term = -(g * D_ped / (Vcx * fCX)) * (dne_dx - self.dne_dx_neginf)
+        fc_term = (self._C_cx_sc(x) - 1.0) * nFC
+        nCX = np.maximum(flux_term + fc_term, 0.0)
+        return nFC, nCX
+
     # ------------------------------------------------------------------
     # Picard bookkeeping shared by both implementations
     # ------------------------------------------------------------------
@@ -840,9 +894,12 @@ class saarelma_connor_sc(saarelma_connor):
 
         Returns
         -------
-        x_sol, ne_sol, dne_dx_sol : ndarray
-            SI radial grid (m), electron density (m^-3), and its
-            gradient (m^-4) of the converged solution.
+        dict
+            The common solver result schema -- see
+            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
+            ``x``, ``ne`` and ``dne_dx`` are the converged SI profiles;
+            ``nFC`` / ``nCX`` are derived from them via Saarelma
+            Eqs. (11)-(12), since they are not unknowns of this model.
         """
         v = self.verbose if verbose is None else bool(verbose)
         picard_relax = float(picard_relax)
@@ -1140,7 +1197,7 @@ class saarelma_connor_sc(saarelma_connor):
         if v:
             print(f"[sc scipy] solved.  n_e in "
                   f"[{self.ne_sol.min():.3e}, {self.ne_sol.max():.3e}] m^-3")
-        return self.x_sol, self.ne_sol, self.dne_dx_sol
+        return self._build_result_dict('1D', 'scipy')
 
     # ------------------------------------------------------------------
     # Firedrake implementation
@@ -1308,8 +1365,10 @@ class saarelma_connor_sc(saarelma_connor):
 
         Returns
         -------
-        x_sol, ne_sol, dne_dx_sol : ndarray
-            SI profiles on the sorted DOF grid.
+        dict
+            The common solver result schema -- see
+            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
+            Profiles are on the sorted DOF grid.
         """
         if not _FIREDRAKE_AVAILABLE:
             raise ImportError(
@@ -1626,7 +1685,7 @@ class saarelma_connor_sc(saarelma_connor):
         if v:
             print(f"[sc firedrake] solved.  n_e in "
                   f"[{self.ne_sol.min():.3e}, {self.ne_sol.max():.3e}] m^-3")
-        return self.x_sol, self.ne_sol, self.dne_dx_sol
+        return self._build_result_dict('1D', 'firedrake')
 
     # ------------------------------------------------------------------
     # Dispatcher
@@ -1645,7 +1704,9 @@ class saarelma_connor_sc(saarelma_connor):
 
         Returns
         -------
-        x_sol, ne_sol, dne_dx_sol : ndarray
+        dict
+            The common solver result schema -- see
+            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
         """
         implementation = str(implementation).lower()
         if implementation == "firedrake":
@@ -1656,3 +1717,15 @@ class saarelma_connor_sc(saarelma_connor):
             f"implementation must be 'firedrake' or 'scipy', got "
             f"{implementation!r}."
         )
+
+
+def __getattr__(name):
+    """Resolve the pre-refactor class name to the assembled class.
+
+    Deferred rather than a top-level import: ``solver_api`` imports this
+    module, so binding the name at import time would be a cycle.
+    """
+    if name == 'saarelma_connor_sc':
+        from src.solver_api import saarelma_connor
+        return saarelma_connor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

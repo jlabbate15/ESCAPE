@@ -14,13 +14,13 @@ import itertools
 
 
 # Output directory
-output_dir = 'ARC_workflow_noKBM_ETG05_large'
+output_dir = 'ARC_workflow_noKBM_ETG09_psi085'
 Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 # Free parameters
 alpha_crits = np.logspace(-1, 1, 1)
 C_KBMs = np.array([0.0])
-De_chie_etgs = np.array([0.5])
+De_chie_etgs = np.array([0.9])
 nFC_x0s = np.logspace(14.5, 17.0, 5)
 ncx_x0_ratios = np.array([0.1,1,10,20,30])
 
@@ -120,7 +120,7 @@ for combo in itertools.product(alpha_crits, C_KBMs, De_chie_etgs, nFC_x0s, ncx_x
             kprof_loc = 'manual profs',
             manual_profs = manual_profs,
             P_tot_e = ( 21.5 + 0.8 + 227 ) * 0.5 * 1e6, # table 4 of Hillesheim et al. 2026
-            psi_N_inner = 0.75,
+            psi_N_inner = 0.85,
             out_dir = out_dir,
             species = 'D-T',
             # Z_i = Zeff,
