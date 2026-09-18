@@ -1,226 +1,7 @@
-"""Non-dimensional solvers for the ORIGINAL (implicit) Saarelma-Connor
-pedestal model, in a Firedrake and a scipy implementation.
+"""Non-dimensional Firedrake and scipy solvers for the original (implicit)
+Saarelma-Connor pedestal model ("1D").
 
-Model
-=====
-This module solves the *original* Saarelma-Connor model: the single
-implicit second-order ODE for the electron density that is obtained
-after the two neutral fluids have been eliminated analytically
-(S. Saarelma et al 2023 Nucl. Fusion 63 052002; Eqs. (6)-(7) of the
-Labbate APAM E9301 report; rigorous derivations in
-docs/derivation_eq16.tex and docs/derivation_eq15.tex).  Only the
-electron density is solved for -- the neutrals never appear as unknowns,
-they enter through the closed-form closures already substituted into
-Eqs. (6)-(7).
-
-Step 1 -- the no-CX "first step" (report Eq. 6 == Saarelma Eq. 16):
-
-    d/dx [ <|grad r|^2> D_ped dn_e/dx ]
-        = n_e D_ped (S_i + S_CX) / (|V_FC| f_FC)
-              * ( dn_e/dx - dn_e/dx|_in )                    (eq6_form="paper")
-
-    d/dx [ <|grad r|^2> D_ped dn_e/dx ]
-        = n_e (S_i + S_CX) / (1 + S_CX/(2 S_i))
-              * <|grad r|^2> D_ped / (|V_FC| f_FC)
-              * ( dn_e/dx - dn_e/dx|_in )               (eq6_form="complete")
-
-``eq6_form`` selects between the equation exactly as printed and the
-complete form of docs/derivation_eq16.tex Eq. (16-full), from which the
-printed one follows by dropping the shape factor 1 + S_CX/(2 S_i)
-(assumption A5) and by cancelling the <|grad r|^2> of the transport
-operator against the D_ped of the neutral closure (a *symbolic*
-cancellation that is only legitimate when <|grad r|^2> ~ 1).  The two
-differ by the factor (1 + S_CX/(2 S_i)) / <|grad r|^2>, which is not a
-detail: on the DIII-D 158091 case shipped with this repository
-<|grad r|^2> ~ 0.05, so the printed form is ~35x stiffer than the
-complete one -- its solution amplifies by exp(176) across the pedestal
-and neither implementation can solve it in double precision, whereas
-the complete form amplifies by ~70 and converges.  ``"complete"`` is
-therefore the default; it is also the form consistent with Eq. (7)
-below, which keeps <|grad r|^2> D_ped in the same place.
-
-Step 2 -- the full implicit equation (report Eq. 7 == the corrected
-Saarelma Eq. 15):
-
-    d/dx [ <|grad r|^2> D_ped dn_e/dx ]
-        = - n_e S_i { - <|grad r|^2> D_ped / (|V_CX| f_CX)
-                          * ( dn_e/dx - dn_e/dx|_in )
-                      + C_CX(x) <n_FC>(0) E(x) }
-
-with the CX-flux coefficient and the FC attenuation ("optical depth")
-kernel
-
-    C_CX(x) = 1 - ( |V_FC| f_FC / (|V_CX| f_CX) )
-                  * (S_i + S_CX/2) / (S_i + S_CX)
-    E(x)    = exp[ int_0^x n_e(x') (S_i + S_CX) / (f_FC |V_FC|) dx' ].
-
-(The form factors f_FC and f_CX are carried explicitly.  The report
-writes Eq. 6 with f_FC = 1 -- assumption A4 of docs/derivation_eq16.tex,
-which is what ``saarelma_connor.form_factor`` sets -- so the two forms
-agree identically for the current form-factor model.)
-
-The pedestal diffusivity is
-
-    D_ped(x, n_e) = D_NEO(x) + D_KBM(x) + C_ETG(x) / n_e,
-
-with C_ETG = De_chie_etg * P_tot_e / (S_plasma |dT_e/dx|) and D_KBM from
-the pedestal-averaged Connor-Hastie alpha (Saarelma Eqs. 24-25); see
-:meth:`saarelma_connor_sc.calc_D_KBM_average_sc`.
-
-Implicit (Picard) solve
-=======================
-Following Saarelma et al. (2023), the non-local kernel E(x) makes Eq. (7)
-an integro-differential equation, so it is solved implicitly:
-
-    1. Solve Eq. (6) (no CX neutrals) for a first n_e profile.
-    2. Iterate Eq. (7): on each Picard iteration E(x) is evaluated with
-       the *previous* n_e and frozen, and D_KBM is refrozen from the
-       latest n_e using the pedestal-averaged ("average" gate mode)
-       alpha -- exactly the treatment of
-       ``solver_nondim.solve_coupled_nondim`` with
-       ``kbm_treatment="picard"`` / ``picard_gate_mode="average"``
-       (frozen scalar-gated diffusivity, optional under-relaxation).
-       Repeat until the profile and the gate state stop changing.
-
-Two practical notes on this loop, both observed on the DIII-D 158091
-case and both controllable from the solver signature:
-
-  * Step 1 can have *no solution*.  Eq. (6) is a positive-feedback
-    amplifier (more density gradient -> larger implied <n_FC> -> more
-    ionisation -> more gradient), and for a steep enough inner-boundary
-    slope every profile collapses to n_e ~ 0 before reaching the
-    separatrix, so no member of the family satisfies n_e(0) = ne_x0.
-    Saarelma et al. only use Eq. (16) as "a convenient starting point",
-    so ``first_step`` selects "eq6" (always run it, raise on failure),
-    "skip" (go straight to the Eq. 7 Picard loop from ``initial_guess``)
-    or "auto" (default: try Eq. 6, warn and fall back to "skip").
-  * The KBM gate can limit-cycle.  When the converged alpha_bar sits
-    close to alpha_crit the whole-pedestal gate flips every iteration
-    and the profile alternates between two states forever.  Damp it with
-    ``picard_relax`` < 1 (0.5 works on the case above); the
-    non-convergence error message diagnoses this explicitly.
-
-Non-dimensionalisation
-======================
-    xi = x / L,    L  = |x_inner|,                 xi in [-1, 0]
-    N  = n_e / n0, n0 = ne_x0,                     N(0) = 1
-    S0 = S_i(0)   (separatrix ionisation rate coefficient)
-    [V]_0 = L n0 S0,        [D]_0 = L^2 n0 S0
-
-Writing f(x, n_e) = <|grad r|^2> D_ped for the total conductance and
-splitting off its n_e dependence, f = f0(x) + f1(x)/n_e with
-
-    f0 = <|grad r|^2> (D_NEO + D_KBM),   f1 = <|grad r|^2> C_ETG,
-
-the expanded non-dimensional ODEs solved by the scipy implementation are
-
-    Eq. 6:  N'' = C_A6 N (N' - N'_in) - C_K N' + C_N (N')^2
-    Eq. 7:  N'' = C_A  N (N' - N'_in) - C_E N - C_K N' + C_N (N')^2
-
-    C_A6 = n0 L (S_i + S_CX) / (<|grad r|^2> |V_FC| f_FC)      ("paper")
-         = n0 L (S_i + S_CX) / ((1 + S_CX/(2 S_i)) |V_FC| f_FC)
-                                                            ("complete")
-    C_A  = n0 L S_i / (|V_CX| f_CX)
-    C_E  = L^2 S_i C_CX <n_FC>(0) E(x) / f
-    C_K  = (L / f) ( df0/dx + (1/n_e) df1/dx )
-    C_N  = f1 / (n0 N^2 f)
-
-where N'_in = (L/n0) dn_e/dx|_in is the non-dimensional Neumann value
-(cf. docs/derivation_eq16.tex Sec. "Non-dimensionalization").
-
-The Firedrake implementation keeps the conservative form.  With
-hat_f = f/[D]_0, hat_S = S/S0, hat_V = V/[V]_0 and hat_nFC0 = nFC_x0/n0
-the strong forms are
-
-    Eq. 6:  d/dxi[hat_f N'] = N (hat_f / <|grad r|^2>)
-                (hat_S_i + hat_S_CX) (N' - N'_in) / (hat_V_FC f_FC)
-                                                            ("paper")
-            d/dxi[hat_f N'] = N hat_f (hat_S_i + hat_S_CX)
-                / (1 + hat_S_CX/(2 hat_S_i))
-                * (N' - N'_in) / (hat_V_FC f_FC)         ("complete")
-    Eq. 7:  d/dxi[hat_f N'] = N hat_S_i [ hat_f (N' - N'_in)
-                / (hat_V_CX f_CX) - C_CX hat_nFC0 E(xi) ]
-
-which are multiplied by a test function w and integrated by parts in the
-usual way (the residuals are assembled in
-:meth:`saarelma_connor_sc.solve_sc_firedrake`).
-
-Agreement between the two implementations
------------------------------------------
-On the DIII-D 158091 case the converged profiles agree to ~3e-3 in
-max-norm, and each satisfies its own discrete Eq. (7) far better than
-that (the conservative residual of the Firedrake solution falls as the
-mesh is refined, ~1e-3 at x_res = 400; the scipy solution sits at ~2e-4
-of its own collocation problem).  The residual difference between them
-is dominated not by the discretisation but by how each reconstructs the
-equilibrium coefficients between the points of the (coarse) p-file
-grid: the Firedrake path samples them with ``np.interp`` into the finite
-element space, as the rest of this repository does, while the scipy path
-needs df/dx and therefore uses a shape-preserving PCHIP interpolant.
-
-Boundary conditions
--------------------
-``ne_grad_bc_loc`` selects which end carries the prescribed gradient.
-
-``"inner"`` (default, unchanged behaviour):
-
-    Neumann   at xi = -1 (inner):  N'(-1) = (L/n0) dn_e/dx|_in
-    Dirichlet at xi =  0 (outer):  N(0)   = 1  (i.e. n_e(0) = ne_x0)
-
-``"outer"`` -- both conditions at the separatrix, inner boundary free:
-
-    Dirichlet at xi =  0 (outer):  N(0)   = 1
-    Neumann   at xi =  0 (outer):  N'(0)  = (L/n0) dn_e/dx|_0
-    (nothing imposed at xi = -1)
-
-This is the boundary-condition set of Saarelma et al. 2023 Sec. 2.3,
-where the separatrix density and its gradient -- the latter from their
-SOL model, Eq. (20): dn_e/dx|_0 = -n_e(0)/sqrt(D_SOL tau_par) -- are the
-specified data and nothing is imposed at the pedestal top.
-
-Note that N'_in is *two* different things in this model and only one of
-them is a boundary condition:
-
-  * the value of the Neumann condition at xi = -1, and
-  * Saarelma's constant of integration C = dn_e/dx|_{x=-inf}, which
-    appears inside the source term of both Eq. (6) and Eq. (7) as the
-    combination (N' - N'_in) -- the accumulated ionisation source
-    between the deep interior and x, i.e. the statement that the
-    neutrals are extinguished by the pedestal top.
-
-In ``"inner"`` mode the two coincide, which is self-consistent: imposing
-N'(-1) = N'_in makes the source vanish exactly at the inner boundary.
-In ``"outer"`` mode only the first role moves; C keeps the inner slope
-from ``dne_dx_inner`` / ``bc_origin``, because it is a model constant
-rather than a boundary condition.
-
-``solve_sc_scipy`` imposes the ``"outer"`` pair directly (``solve_bvp``
-accepts both residuals at one end).  ``solve_sc_firedrake`` cannot: the
-strong Dirichlet condition at boundary id 2 makes w(0) = 0, so a ds(2)
-flux term vanishes identically.  There the equivalent well-posed
-statement -- the inner flux is an unknown fixed by the separatrix
-gradient -- is solved by secant iteration on the ds(1) slope, leaving
-the function space and the Picard loop untouched.  Diagnostics land in
-``self.grad_bc_info``.
-
-Free parameters: alpha_crit, De_chie_etg, C_KBM, nFC_x0 -- set through
-the parent constructor, through ``update_free_params``, or per solve
-through the ``free_params`` argument of either entry point.
-
-This module contributes :class:`SCSolverMixin` to the single public class
-:class:`src.solver_api.saarelma_connor`; all equilibrium / kinetic /
-cross-section initialisation comes from
-:class:`src.solver.SaarelmaConnorBase`.
-
-Entry points
-============
-    saarelma_connor.solve_sc_scipy(...)      -- scipy solve_bvp
-    saarelma_connor.solve_sc_firedrake(...)  -- Firedrake / SNES
-    saarelma_connor.solve_sc(...)            -- thin dispatcher
-    saarelma_connor.solve(model='1D', ...)   -- unified entry point
-
-All of them return the common result dictionary described in
-:meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
+Full documentation: docs/solver_1d_documentation.tex.
 """
 
 import numpy as np
@@ -239,105 +20,39 @@ except Exception as _firedrake_import_err:
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
 from src import bc_ig_helpers as bcig
+from src.saarelma_connor_base import FREE_PARAM_NAMES
 
 
 # Conversion constant (eV -> J)
 _EV2J = 1.60218e-19
 
 # Free parameters of the model (all four must be set before solving).
-_FREE_PARAM_NAMES = ("alpha_crit", "De_chie_etg", "C_KBM", "nFC_x0")
+# Re-exported from the base class, which owns the canonical definition.
+_FREE_PARAM_NAMES = FREE_PARAM_NAMES
 
 
-class SCSolverMixin:
-    """Original (implicit) Saarelma-Connor model, non-dimensionalised ("1D").
-
-    A mixin over :class:`src.solver.SaarelmaConnorBase`; it is combined
-    with the base and :class:`src.solver_nondim.NondimSolverMixin` into the
-    single public :class:`src.solver_api.saarelma_connor`.  It defines no
-    ``__init__`` -- every attribute it reads is set by the base
-    constructor -- and it overrides nothing, so it only ever adds the
-    ``*_sc`` methods below.
-
-    Solves the single second-order ODE for n_e only (report Eqs. (6)-(7)
-    / Saarelma Eq. 16 and corrected Eq. 15) with the two-step implicit
-    scheme of the original paper, in two interchangeable implementations:
-
-        solve_sc_scipy      -- scipy.integrate.solve_bvp
-        solve_sc_firedrake  -- Firedrake (CG finite elements, SNES Newton)
-
-    Both share the initialisation machinery of the base class
-    (``setup_solver_grids``, ``form_factor``, ``find_inner_boundary``,
-    ``construct_C_ETG``) and the same Picard "average"-gate pedestal
-    pressure feature as ``solver_nondim`` (KBM diffusivity refrozen every
-    Picard iteration from the pedestal-averaged alpha of the latest n_e;
-    cf. ``solver_nondim.py`` lines 1248-1262).
-
-    Free parameters: alpha_crit, De_chie_etg, C_KBM, nFC_x0.
-    Boundary conditions: Neumann at the inner boundary, Dirichlet
-    (n_e = ne_x0) at the separatrix.  No other combination is supported.
-
-    After a successful solve the following attributes are set:
-
-        self.x_sol, self.ne_sol, self.dne_dx_sol   : SI profiles
-        self.hat_x_sol, self.hat_ne_sol            : non-dim profiles
-        self.E_sol                                 : converged FC kernel
-                                                     E(x) on x_sol
-        self.alpha_bar_ped, self.kbm_gate_on       : final KBM gate state
-        self.picard_info, self.kbm_info            : iteration diagnostics
-        self._L_sc, self._n0_sc, self._S0_sc,
-        self._V0_sc, self._D0_sc                   : reference scales
+class OneDSolverMixin:
+    """Mixin adding the original implicit Saarelma-Connor n_e-only solver
+    (report Eqs. 6-7) to saarelma_connor. The attributes set after a solve are
+    listed in docs/solver_1d_documentation.tex.
     """
 
     # ------------------------------------------------------------------
-    # Shared setup
+    # Implementation-shared setup
     # ------------------------------------------------------------------
 
     def _check_free_params_sc(self):
-        """Raise if any of the four free parameters is unset."""
-        missing = [n for n in _FREE_PARAM_NAMES
-                   if getattr(self, n, None) is None]
-        if missing:
-            raise ValueError(
-                "The original Saarelma-Connor model needs all four free "
-                f"parameters; missing: {', '.join(missing)}.  Set them on "
-                "the constructor, with update_free_params(), or pass "
-                "free_params={'alpha_crit': ..., 'De_chie_etg': ..., "
-                "'C_KBM': ..., 'nFC_x0': ...} to the solver."
-            )
+        """Backwards-compatible alias for :meth:`solver.check_free_params`."""
+        self.check_free_params()
 
     def _ensure_sc_setup(self, x_res, free_params=None, force=False):
-        """Equilibrium-only setup shared by both implementations.
-
-        Optionally updates the free parameters, then runs the parent
-        initialisation methods (solver grids, form factors, ETG
-        coefficient), locates the inner boundary, and computes the
-        non-dimensional reference scales.
-
-        Parameters
-        ----------
-        x_res : int
-            Resolution handed to ``setup_solver_grids``.
-        free_params : dict or None
-            Optional ``{'alpha_crit', 'De_chie_etg', 'C_KBM', 'nFC_x0'}``
-            (plus any keyword accepted by ``update_free_params``, e.g.
-            ``psi_N_inner_boundary``) applied before the setup.
-        force : bool
-            Re-run ``setup_solver_grids`` / ``form_factor`` even if they
-            were already built for this ``x_res``.
+        """Apply free parameters, build the solver grids, form factors and
+        C_ETG, locate the inner boundary, and set the non-dim reference scales.
         """
         if not hasattr(self, "_fd_cache"):
             self._fd_cache = {}
 
-        if free_params is not None:
-            fp = dict(free_params)
-            self.update_free_params(
-                fp.pop("alpha_crit", self.alpha_crit),
-                fp.pop("C_KBM", self.C_KBM),
-                fp.pop("De_chie_etg", self.De_chie_etg),
-                fp.pop("nFC_x0", self.nFC_x0),
-                **fp,
-            )
-        self._check_free_params_sc()
+        self.apply_free_params(free_params)
 
         # form_factor + setup_solver_grids (cached per x_res), exactly as
         # the parent's coupled solver does, then the ETG coefficient
@@ -376,46 +91,13 @@ class SCSolverMixin:
         self._V0_sc = self._L_sc * self._n0_sc * S0          # m/s
         self._D0_sc = (self._L_sc ** 2) * self._n0_sc * S0   # m^2/s
 
-    # Boundary-condition resolution and initial guesses live in
-    # src/bc_ig_helpers.py so the 1D/3D x firedrake/scipy solvers
-    # share exactly one implementation; see that module's docstring.
-
     def _shoot_outer_grad_sc(
         self, F, N, bcs, snes_params,
         slope_c, target, tol, max_it, verbose, tag,
     ):
-        """Solve ``F == 0`` subject to N'(0) == ``target``.
-
-        The inner boundary carries no condition of its own in the
-        ``"outer"`` mode, so the ds(1) flux slope ``slope_c`` is the free
-        unknown; a damped secant iteration drives
-
-            r(s) = N'(0; s) - target
-
-        to zero.  ``slope_c`` is deliberately *not* the constant C of the
-        source term -- that stays at the inner slope -- so only the
-        boundary flux moves here.
-
-        The seed is the inner slope, which can be far from the answer
-        (the free flux routinely lands on the other side of zero), and
-        Eq. (7) need not be solvable for every slope in between: each
-        step is capped at four times the previous accepted one and
-        backtracked, halving, whenever SNES fails.
-
-        Every attempt restarts from the *same* reference state (the
-        iterate this routine was handed) rather than from the previous
-        attempt's answer.  That is deliberate.  Chaining warm starts
-        makes r(s) path dependent -- revisiting one slope reproduced
-        N'(0) only to ~5e-5 on the DIII-D 158091 case -- and, worse,
-        once two slopes are close the warm start already passes SNES's
-        convergence test, so it returns at iteration zero with the
-        density untouched and the secant sees a *bit-identical* residual
-        for two different slopes and concludes the gradient does not
-        respond at all.  Restarting from a fixed reference makes r(s) a
-        genuine function of s, which is what the secant needs; the cost
-        is a few more Newton steps per attempt.
-
-        Returns a diagnostics dict.
+        """Secant-iterate the free ds(1) slope ``slope_c`` until N'(0) ==
+        ``target``, restarting each attempt from the same reference state;
+        returns a diagnostics dict.
         """
         grad_sep_form = N.dx(0) * ds(2)   # ds(2) has unit measure in 1D
         scale = max(abs(target), 1e-30)   # tol is relative to the target
@@ -520,43 +202,10 @@ class SCSolverMixin:
         }
 
     def calc_D_KBM_average_sc(self, n_e_ped, x_ped):
-        """Pedestal-averaged-alpha KBM diffusivity on the x_init grid.
-
-        This is the "average" Picard gate mode of
-        :meth:`solver_nondim.saarelma_connor_nondim.calc_pressure_quantities_nondim`
-        specialised to the original model: the Connor-Hastie alpha is
-        evaluated locally from the given pedestal density profile,
-
-            alpha(x) = alpha_nodp(x) * d/dx [ n_e (T_e + T_i) e ],
-
-        averaged over the pedestal, and gated as a whole:
-
-            gate  = alpha_bar > alpha_crit
-            D_KBM = (alpha_bar - alpha_crit) * C_KBM c_s rho_s^2 / a
-                    (everywhere, when the gate is on; zero otherwise).
-
-        Parameters
-        ----------
-        n_e_ped : array_like
-            Electron density (m^-3) on ``x_ped``.
-        x_ped : array_like
-            Ascending pedestal grid (m), x in [x_inner, 0].
-
-        Returns
-        -------
-        D_KBM_xinit : ndarray
-            KBM diffusivity (m^2/s) on ``self.x_init`` (used to build
-            the coefficient interpolators / Functions).
-
-        Sets
-        ----
-        self.alpha_bar_ped : float
-        self.alpha_frac_above : float
-        self.kbm_gate_on   : bool
-        self.alpha_local_ped : ndarray  (local alpha on x_ped)
-        self._D_KBM        : ndarray    (same as the return value; also
-                                         keeps find_inner_boundary
-                                         re-entrant)
+        """KBM diffusivity on x_init from the pedestal-averaged Connor-Hastie
+        alpha of ``n_e_ped`` on ``x_ped``, gated as a whole (Saarelma Eqs.
+        24-25). Also sets alpha_bar_ped, alpha_frac_above, kbm_gate_on,
+        alpha_local_ped and _D_KBM.
         """
         x_ped = np.asarray(x_ped, dtype=float)
         n_e_ped = np.asarray(n_e_ped, dtype=float)
@@ -590,13 +239,8 @@ class SCSolverMixin:
     # ------------------------------------------------------------------
 
     def _exp_kernel_sc(self, n_e, x):
-        """E(x) = exp[ int_0^x n_e (S_i + S_CX) / (f_FC |V_FC|) dx' ].
-
-        ``x`` is an ascending grid (x_inner ... 0).  Returns E on the
-        same grid; E(0) = 1 and E decays monotonically inward.  This is
-        the same closure the parent class uses for <n_FC> in
-        ``find_inner_boundary`` / ``compute_post_solve_SC_neutrals``,
-        i.e. <n_FC>(x) = nFC_x0 * E(x).
+        """FC attenuation kernel E(x) = exp[int_0^x n_e (S_i + S_CX) / (f_FC
+        |V_FC|) dx'] on the ascending grid ``x``.
         """
         x = np.asarray(x, dtype=float)
         n_e = np.asarray(n_e, dtype=float)
@@ -616,14 +260,7 @@ class SCSolverMixin:
         return np.exp(integral_from_0)
 
     def _C_cx_sc(self, x):
-        """CX-flux coefficient C_CX(x) of report Eq. (7), on ``x`` (m).
-
-            C_CX = 1 - ( |V_FC| f_FC / (|V_CX| f_CX) )
-                       * (S_i + S_CX/2) / (S_i + S_CX)
-
-        Purely a ratio of velocities and rate coefficients, so it is
-        scale-invariant and built once in SI.
-        """
+        """CX-flux coefficient C_CX(x) of report Eq. (7) on ``x`` (m)."""
         x = np.asarray(x, dtype=float)
         Si = np.interp(x, self.x_init, self.S_i_pres)
         Scx = np.interp(x, self.x_init, self.S_cx_pres)
@@ -635,30 +272,8 @@ class SCSolverMixin:
         )
 
     def _post_solve_neutrals_sc(self):
-        """<n_FC> and <n_CX> (m^-3) on ``self.x_sol`` from the converged n_e.
-
-        The neutrals are not unknowns of this model, so they are
-        reconstructed after the solve with Saarelma et al. (2023)
-        Eqs. (11)-(12):
-
-            <n_FC> = nFC_x0 * E(x)
-            <n_CX> = max( -<|grad r|^2> D_ped / (|V_CX| f_CX)
-                              * (n_e' - n_e'(-inf))
-                          + (C_CX - 1) <n_FC>,  0 )
-
-        This is the same closure as the base class's
-        ``compute_post_solve_SC_neutrals``, with two differences that make
-        it match what this solver actually solved:
-
-        * every coefficient is interpolated from ``x_init`` onto
-          ``x_sol``, rather than assumed to share its length -- the
-          adaptive ``solve_bvp`` mesh never does;
-        * the ETG part of D_ped is ``C_ETG / n_e``, which carries
-          ``De_chie_etg``, rather than ``D_ETG_x / n_e``, which does not.
-          The two agree only for De_chie_etg = 1.
-
-        D_KBM is the frozen Picard value on ``self._D_KBM``, i.e. the one
-        the final n_e was solved with.
+        """Reconstruct <n_FC> and <n_CX> (m^-3) on ``self.x_sol`` from the
+        converged n_e via Saarelma Eqs. (11)-(12).
         """
         x = np.asarray(self.x_sol, dtype=float)
         n_e = np.asarray(self.ne_sol, dtype=float)
@@ -717,16 +332,8 @@ class SCSolverMixin:
         return first_step
 
     def _first_step_failed_sc(self, tag, first_step, err):
-        """Handle a failed step 1: re-raise, or warn and fall back.
-
-        Eq. (6) is a positive-feedback amplifier -- every bit of extra
-        density gradient increases the implied <n_FC>, which steepens the
-        gradient further -- so for a steep enough inner-boundary slope it
-        has no solution that still reaches n_e(0) = ne_x0 (the profile
-        collapses first).  Saarelma et al. (2023) only use it as "a
-        convenient starting point" for the Eq. (7) iteration, so when it
-        fails the Picard loop can equally well start from the initial
-        guess.
+        """Handle a failed Eq. (6) first step: re-raise if
+        ``first_step='eq6'``, otherwise warn and fall back to 'skip'.
         """
         msg = (
             f"[{tag}] the first step (Eq. 6, eq6_form="
@@ -775,11 +382,7 @@ class SCSolverMixin:
                 f"[{tag}] Picard loop did not converge in {picard_max_it} "
                 f"iterations (last |dne|_rel = {last:.3e})"
             )
-            # The usual culprit is a KBM gate limit cycle: alpha_bar
-            # straddles alpha_crit, so the gate (and with it D_KBM) flips
-            # every iteration and the profile alternates between two
-            # states.  Diagnose it explicitly -- the fix is different
-            # from "just iterate longer".
+            # Diagnose a KBM gate limit cycle (alpha_bar straddles alpha_crit).
             gates = [h["kbm_gate_on"] for h in history[-6:]]
             if len(set(gates)) > 1:
                 a_lo = min(h["alpha_bar"] for h in history[-6:])
@@ -823,83 +426,10 @@ class SCSolverMixin:
                        bvp_max_nodes=5000,
                        reuse_setup=True,
                        verbose=None):
-        """Implicit scipy (``solve_bvp``) solver for the original model.
-
-        Step 1 solves the non-dimensional no-CX equation (report Eq. 6)
-        for a first n_e; step 2 Picard-iterates the full equation
-        (report Eq. 7) with the exponential kernel E(x) and the
-        pedestal-averaged KBM diffusivity frozen from the previous
-        iterate, until the profile and the KBM gate stop changing.
-
-        Parameters
-        ----------
-        x_res : int
-            Number of points of the (uniform) non-dimensional solver
-            grid handed to ``solve_bvp`` as its initial mesh.
-        free_params : dict or None
-            Optional free parameters applied before solving; see
-            :meth:`_ensure_sc_setup`.
-        bc_origin : {"p-file", "user"}
-            Where the prescribed slopes come from: the p-file density
-            gradient, or the user-supplied ``dne_dx_inner`` /
-            ``dne_dx_outer``.
-        dne_dx_inner : float or None
-            SI inner-boundary slope (m^-4, must be negative) when
-            ``bc_origin="user"``.  Always supplies Saarelma's constant
-            of integration C in the source term, whatever
-            ``ne_grad_bc_loc`` is; it is additionally the Neumann BC
-            value in ``ne_grad_bc_loc="inner"`` mode.
-        ne_grad_bc_loc : {"inner", "outer"}, default "inner"
-            Which end carries the prescribed dn_e/dx; see the module
-            docstring.  ``"outer"`` puts both n_e conditions at the
-            separatrix and leaves the inner boundary free.
-        dne_dx_outer : float or None
-            SI separatrix slope dn_e/dx|_{x=0} (m^-4, must be negative)
-            used when ``ne_grad_bc_loc="outer"``.  Given explicitly it
-            wins for any ``bc_origin`` (this is how Saarelma Eq. (20) is
-            fed in); left None it is read off the p-file gradient at
-            x = 0, which requires ``bc_origin="p-file"``.
-        initial_guess : {"pfile", "linear", "tanh"}
-            Shape of the initial n_e profile (SI), as in solver_nondim.
-        tanh_width, tanh_center : float or None
-            Parameters of the "tanh" initial guess (SI metres).
-        eq6_form : {"complete", "paper"}
-            Which form of the first step to solve; see the module
-            docstring.  "paper" is Eq. 6 exactly as printed and is only
-            usable when <|grad r|^2> is close to 1: otherwise it either
-            fails outright or converges to a collapsed profile that the
-            Eq. (7) iteration cannot then start from.
-        first_step : {"auto", "eq6", "skip"}
-            Whether to run step 1 at all.  "eq6" always runs it and
-            raises if it fails; "skip" starts the Eq. (7) Picard loop
-            directly from ``initial_guess``; "auto" (default) tries
-            Eq. (6) and falls back to "skip" with a ``RuntimeWarning``
-            if it has no solution (see :meth:`_first_step_failed_sc`).
-        picard_max_it : int
-            Maximum number of Picard iterations of the full Eq. (7).
-        picard_rtol : float
-            Relative max-norm tolerance on the change in n_e between
-            Picard iterations.
-        picard_relax : float in (0, 1]
-            Under-relaxation of the frozen D_KBM and E(x) updates.
-        bvp_tol : float
-            ``solve_bvp`` residual tolerance.
-        bvp_max_nodes : int
-            ``solve_bvp`` maximum number of mesh nodes.
-        reuse_setup : bool
-            Reuse cached solver grids / form factors when the resolution
-            is unchanged (set False after changing the equilibrium).
-        verbose : bool or None
-            Override ``self.verbose``.
-
-        Returns
-        -------
-        dict
-            The common solver result schema -- see
-            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
-            ``x``, ``ne`` and ``dne_dx`` are the converged SI profiles;
-            ``nFC`` / ``nCX`` are derived from them via Saarelma
-            Eqs. (11)-(12), since they are not unknowns of this model.
+        """Implicit scipy ``solve_bvp`` solver: an Eq. (6) first step, then
+        Picard iteration of Eq. (7) with E(x) and D_KBM frozen from the
+        previous iterate. Parameters are documented in
+        docs/solver_1d_documentation.tex; returns the common result dict.
         """
         v = self.verbose if verbose is None else bool(verbose)
         picard_relax = float(picard_relax)
@@ -965,22 +495,8 @@ class SCSolverMixin:
                   f"[D]_0 = {self._D0_sc:.4e} m^2/s")
 
         def _build_f_interp(D_KBM_xinit):
-            """Interpolators for f0, f1 and their x-derivatives.
-
-            f0 = <|grad r|^2>(D_NEO + D_KBM) (m^2/s),
-            f1 = <|grad r|^2> C_ETG          (m^2/s * m^-3).
-
-            The expanded ODE needs df0/dx and df1/dx (the C_K term), and
-            the accuracy of the whole solve is limited by them: x_init is
-            the p-file pressure grid, which typically carries only a few
-            tens of points across the pedestal.  A shape-preserving
-            (PCHIP) interpolant of f0 / f1 with its analytic derivative
-            is markedly better there than np.gradient followed by linear
-            interpolation, and unlike a natural cubic spline it cannot
-            overshoot on C_ETG, which spans several decades over x_init.
-            The conservative Firedrake form never differentiates f, so it
-            has no equivalent of this term (see the note on
-            implementation agreement in the module docstring).
+            """PCHIP interpolators for f0 = g (D_NEO + D_KBM), f1 = g C_ETG and
+            their analytic x-derivatives.
             """
             f0_arr = self.gradr2_fsa * (self.D_NEO + D_KBM_xinit)
             f1_arr = self.gradr2_fsa * self.C_ETG
@@ -990,11 +506,8 @@ class SCSolverMixin:
                     f1_spl.derivative())
 
         def _conductance(xi, N, f0_x, f1_x, df0_x, df1_x):
-            """Conductance pieces f, C_K, C_N at (xi, N), plus x.
-
-            ``N`` is floored while it appears in a denominator, so that a
-            solver excursion towards N <= 0 cannot produce a division by
-            zero (the same guard as the parent class's first_step).
+            """Return x, f, C_K and C_N at (xi, N), flooring N where it appears
+            in a denominator.
             """
             x = L * xi
             N_safe = np.maximum(N, 1e-8)
@@ -1204,16 +717,8 @@ class SCSolverMixin:
     # ------------------------------------------------------------------
 
     def _ensure_firedrake_mesh_sc(self, mesh_n, fe_degree, force=False):
-        """Build (or reuse) the non-dim mesh on xi in [-1, 0].
-
-        Only the mesh, function space and DOF coordinates are cached:
-        the coefficient Functions depend on the free parameters and the
-        reference scales, so they are rebuilt on every solve by
-        :meth:`_build_sc_coefficients`.
-
-        Returns
-        -------
-        mesh, V, xi_dofs
+        """Build (or reuse) the non-dim CG mesh on xi in [-1, 0]; returns
+        (mesh, V, xi_dofs).
         """
         if not _FIREDRAKE_AVAILABLE:
             raise ImportError(
@@ -1249,18 +754,8 @@ class SCSolverMixin:
         return mesh, V, xi_dofs
 
     def _build_sc_coefficients(self, V, x_dofs_si):
-        """Frozen equilibrium coefficient Functions in non-dim units.
-
-        All entries are ``Function``s on ``V`` in DOF order:
-
-            g          <|grad r|^2>                     (dimensionless)
-            hat_Si     S_i / S0,   hat_Scx  S_CX / S0
-            hat_Vcx    |V_CX| / [V]_0
-            fFC, fCX   form factors                     (dimensionless)
-            hat_D_NEO  D_NEO / [D]_0
-            hat_C_ETG  C_ETG / (n0 [D]_0)   (so hat_C_ETG / N is the
-                                             non-dim ETG diffusivity)
-            C_cx       report Eq. (7) CX-flux coefficient
+        """Frozen non-dim equilibrium coefficient Functions on ``V`` (g,
+        hat_Si, hat_Scx, hat_Vcx, fFC, fCX, hat_D_NEO, hat_C_ETG, C_cx).
         """
         def _mk(arr_on_xinit, name, scale=1.0):
             f = Function(V, name=name)
@@ -1314,61 +809,10 @@ class SCSolverMixin:
                            ksp_max_it=200,
                            reuse_setup=True,
                            verbose=None):
-        """Implicit Firedrake solver for the original model.
-
-        Solves the same non-dimensional two-step problem as
-        :meth:`solve_sc_scipy` but in conservative (weak) form with CG
-        finite elements and SNES Newton for each frozen-coefficient
-        nonlinear solve:
-
-            Step 1 (report Eq. 6, no CX; ``eq6_form="paper"``):
-                F6 = int hat_f N' w' dxi
-                     + int N (hat_f/g)(hat_Si + hat_Scx)(N' - N'_in)
-                           / (hat_V_FC f_FC) w dxi
-                     + hat_f N'_in w ds(1) = 0
-            (``eq6_form="complete"`` replaces hat_f/g by
-             hat_f / (1 + hat_Scx/(2 hat_Si)); see the module docstring)
-
-            Step 2 (report Eq. 7, Picard on E(x) and D_KBM):
-                F7 = int hat_f N' w' dxi
-                     + int N hat_Si [ hat_f (N' - N'_in)/(hat_V_CX f_CX)
-                                      - C_CX hat_nFC0 E ] w dxi
-                     + hat_f N'_in w ds(1) = 0
-
-        with hat_f = g (hat_D_NEO + hat_D_KBM) + g hat_C_ETG / N (the ETG
-        piece keeps its 1/N dependence inline, so Newton differentiates
-        it exactly), Dirichlet N(0) = 1 (boundary id 2), and the Neumann
-        inner flux imposed weakly through ds(1) (boundary id 1).
-
-        The frozen KBM diffusivity ``hat_D_KBM`` and kernel ``E`` are
-        Functions refreshed between Picard iterations from the latest
-        density -- the same "average"-gate Picard pedestal-pressure
-        treatment as ``solver_nondim`` (Saarelma Eqs. 24-25 diffusivity
-        frozen into the D-slot, optional under-relaxation).
-
-        With ``ne_grad_bc_loc="outer"`` the Dirichlet N(0) = 1 stays but
-        the inner boundary is freed and its ds(1) flux becomes the
-        unknown that a secant iteration adjusts until N'(0) matches
-        ``dne_dx_outer`` (see the module docstring for why a ds(2) term
-        cannot impose it directly).  Every nonlinear solve -- step 1 and
-        each Picard iteration of step 2 -- is wrapped in that iteration,
-        with the slope carrying over so later shootings start close.
-        The source constant N'_in is untouched by this and keeps the
-        inner slope.
-
-        Parameters are as in :meth:`solve_sc_scipy`, plus the finite
-        element / PETSc controls of the parent coupled solver
-        (``fe_degree``, ``linear_solver``, ``ksp_rtol``, ``ksp_max_it``)
-        and the ``"outer"``-mode secant controls ``grad_bc_tol``
-        (relative tolerance on N'(0), default 1e-8) and
-        ``grad_bc_max_it`` (default 25).
-
-        Returns
-        -------
-        dict
-            The common solver result schema -- see
-            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
-            Profiles are on the sorted DOF grid.
+        """Implicit Firedrake/SNES solver for the same two-step problem as
+        :meth:`solve_sc_scipy`, in conservative weak form. Parameters and weak
+        forms are documented in docs/solver_1d_documentation.tex; returns the
+        common result dict.
         """
         if not _FIREDRAKE_AVAILABLE:
             raise ImportError(
@@ -1376,6 +820,8 @@ class SCSolverMixin:
                 "Install Firedrake to use this solver.  Original import "
                 f"error:\n  {_FIREDRAKE_IMPORT_ERR}"
             )
+        
+        self._fd_cache = {}
 
         v = self.verbose if verbose is None else bool(verbose)
         force_setup = not reuse_setup
@@ -1458,21 +904,10 @@ class SCSolverMixin:
         )[unsort_idx]
         self._fd_cache["E_kernel_sc"] = E_fd
 
-        # Constants (non-dimensional).  dN_in_c is Saarelma's constant of
-        # integration C in the source term and always holds the inner
-        # slope.  dN_bc_c is the ds(1) boundary flux: the same value in
-        # "inner" mode (where imposing N'(-1) = N'_in makes the source
-        # vanish exactly at the inner boundary), but a free unknown in
-        # "outer" mode, where the secant iteration moves it until N'(0)
-        # matches the prescribed separatrix gradient.
+        # Non-dim constants: dN_in_c is the source constant C (inner slope);
+        # dN_bc_c is the ds(1) flux (BC value "inner", secant unknown "outer").
         dN_in_c = Constant(dN_in_val)      # source constant C
-        # Seed for the "outer"-mode secant.  Zero inner flux is the
-        # natural boundary condition a Galerkin form defaults to, so it is
-        # the neutral starting point and -- unlike seeding from a
-        # pedestal-top gradient -- uses no information the "outer"
-        # pathway forbids.  It is also markedly more robust: r(s) is
-        # discontinuous where the profile switches solution branch, and
-        # approaching from zero avoids straddling that jump.
+        # "outer"-mode secant seed: zero inner flux (the Galerkin natural BC).
         dN_bc_seed = (dN_bc_val if ne_grad_bc_loc == "inner"
                       else (0.0 if grad_bc_seed is None
                             else (L / n0) * float(grad_bc_seed)))
@@ -1583,14 +1018,7 @@ class SCSolverMixin:
                   f"starts from initial_guess={initial_guess!r}")
 
         # --------------------------------------------------------------
-        # Step 2: Picard loop on the full equation.
-        #
-        # Per-iteration-frozen coefficients, updated between Picard
-        # iterations from the latest hat_n_e (cf. solver_nondim
-        # picard_gate_mode="average"):
-        #   - freeze hat_D_KBM = (alpha_bar - alpha_crit) * hat_G into
-        #     the diffusivity (Saarelma Eq. 25);
-        #   - freeze the FC kernel E(xi) built from the latest n_e.
+        # Step 2: Picard loop on Eq. 7, refreezing hat_D_KBM and E(xi).
         # --------------------------------------------------------------
         picard_history = []
         picard_converged = False
@@ -1691,41 +1119,26 @@ class SCSolverMixin:
     # Dispatcher
     # ------------------------------------------------------------------
 
-    def solve_sc(self, implementation="firedrake", **kwargs):
-        """Solve the original model with the chosen implementation.
-
-        Parameters
-        ----------
-        implementation : {"firedrake", "scipy"}
-            Which of the two solvers to call.
-        **kwargs
-            Passed straight through to :meth:`solve_sc_firedrake` or
-            :meth:`solve_sc_scipy`.
-
-        Returns
-        -------
-        dict
-            The common solver result schema -- see
-            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
+    def solve_sc(self, solver_structure="firedrake", **kwargs):
+        """Dispatch to :meth:`solve_sc_firedrake` or :meth:`solve_sc_scipy`
+        according to ``solver_structure``.
         """
-        implementation = str(implementation).lower()
-        if implementation == "firedrake":
+        solver_structure = str(solver_structure).lower()
+        if solver_structure == "firedrake":
             return self.solve_sc_firedrake(**kwargs)
-        if implementation == "scipy":
+        if solver_structure == "scipy":
             return self.solve_sc_scipy(**kwargs)
         raise ValueError(
-            f"implementation must be 'firedrake' or 'scipy', got "
-            f"{implementation!r}."
+            f"solver_structure must be 'firedrake' or 'scipy', got "
+            f"{solver_structure!r}."
         )
 
 
 def __getattr__(name):
-    """Resolve the pre-refactor class name to the assembled class.
-
-    Deferred rather than a top-level import: ``solver_api`` imports this
-    module, so binding the name at import time would be a cycle.
+    """Lazily resolve the legacy name ``saarelma_connor_sc`` to the assembled
+    class (a top-level import would be a cycle).
     """
     if name == 'saarelma_connor_sc':
-        from src.solver_api import saarelma_connor
+        from src.saarelma_connor_api import saarelma_connor
         return saarelma_connor
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

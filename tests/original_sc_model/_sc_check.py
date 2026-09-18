@@ -87,13 +87,13 @@ def kernel_self_consistency(m):
     return float(np.max(np.abs(E_re - m.E_sol)) / np.max(np.abs(E_re)))
 
 
-def run(label, implementation, model=None, **kw):
+def run(label, solver_structure, model=None, **kw):
     m = model if model is not None else build()
     t0 = time.time()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
-            x, ne, dne = m.solve_sc(implementation=implementation,
+            x, ne, dne = m.solve_sc(solver_structure=solver_structure,
                                     **SOLVE_KW, **kw)
         except Exception:
             traceback.print_exc()
@@ -101,7 +101,7 @@ def run(label, implementation, model=None, **kw):
             return None
     dt = time.time() - t0
 
-    interp = "pchip" if implementation == "scipy" else "linear"
+    interp = "pchip" if solver_structure == "scipy" else "linear"
     res = conservative_residual(m, interp)
     dE = kernel_self_consistency(m)
     bc_out = abs(ne[-1] / m.ne_x0 - 1.0)
@@ -153,7 +153,7 @@ for impl, kw in (("scipy", dict(x_res=100)), ("scipy", dict(x_res=400)),
                  ("firedrake", dict(x_res=400, fe_degree=3))):
     m = build()
     try:
-        x, ne, _ = m.solve_sc(implementation=impl, **SOLVE_KW, **kw)
+        x, ne, _ = m.solve_sc(solver_structure=impl, **SOLVE_KW, **kw)
     except Exception as exc:
         print(f"  {impl} {kw}: FAILED ({exc})")
         continue
@@ -165,7 +165,7 @@ print("=" * 72)
 for ac in (0.2, 3.0):
     m = build(alpha_crit=ac)
     try:
-        x, ne, _ = m.solve_sc(implementation="firedrake", x_res=200,
+        x, ne, _ = m.solve_sc(solver_structure="firedrake", x_res=200,
                               **SOLVE_KW)
     except Exception as exc:
         print(f"  alpha_crit = {ac}: FAILED ({exc})")
@@ -179,21 +179,21 @@ print("5. Error paths")
 print("=" * 72)
 m = build()
 try:
-    m.solve_sc(implementation="scipy", x_res=200, first_step="eq6", **SOLVE_KW)
+    m.solve_sc(solver_structure="scipy", x_res=200, first_step="eq6", **SOLVE_KW)
     print("  first_step='eq6': solved (Eq. 6 has a solution for this case)")
 except RuntimeError as exc:
     print(f"  first_step='eq6' raises as expected:\n    "
           f"{str(exc)[:160]}...")
 m = build()
 try:
-    m.solve_sc(implementation="scipy", x_res=200, eq6_form="bogus",
+    m.solve_sc(solver_structure="scipy", x_res=200, eq6_form="bogus",
                **SOLVE_KW)
     print("  eq6_form='bogus': NO ERROR (unexpected)")
 except ValueError as exc:
     print(f"  eq6_form='bogus' rejected: {str(exc)[:90]}...")
 m = build(alpha_crit=None)
 try:
-    m.solve_sc(implementation="scipy", x_res=200, **SOLVE_KW)
+    m.solve_sc(solver_structure="scipy", x_res=200, **SOLVE_KW)
     print("  missing free parameter: NO ERROR (unexpected)")
 except ValueError as exc:
     print(f"  missing free parameter rejected: {str(exc)[:90]}...")

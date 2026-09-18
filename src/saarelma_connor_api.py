@@ -1,4 +1,4 @@
-"""Public entry point: the single Saarelma-Connor model class.
+"""Public entry point: the Saarelma-Connor model class.
 
 The implementation is split across three modules by topic --
 
@@ -10,9 +10,7 @@ The implementation is split across three modules by topic --
     src.solver_sc     SCSolverMixin      -- the original single-equation
                       ("1D") Saarelma-Connor model
 
--- but they are one class, assembled here.  The two mixins define no
-``__init__`` and override nothing, so the split is purely organisational:
-every method resolves exactly as it would in a single class body.
+-- but they are one class, assembled here.
 
 Because there is one class and one constructor, the physics model is chosen
 per solve rather than per instantiation::
@@ -28,12 +26,12 @@ Both calls return the same dictionary schema (see
 code parses one structure regardless of which solver ran.
 """
 
-from src.solver import SaarelmaConnorBase
-from src.solver_nondim import NondimSolverMixin
-from src.solver_sc import SCSolverMixin
+from src.saarelma_connor_base import SaarelmaConnorBase
+from src.solver_3d import ThreeDSolverMixin
+from src.solver_1d import OneDSolverMixin
 
 
-class saarelma_connor(SCSolverMixin, NondimSolverMixin, SaarelmaConnorBase):
+class saarelma_connor(OneDSolverMixin, ThreeDSolverMixin, SaarelmaConnorBase):
     """Equilibrium setup plus both the 1D and coupled 3-equation solvers.
 
     Built once through the shared ``__init__`` of

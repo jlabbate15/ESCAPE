@@ -11,10 +11,10 @@ from scipy.interpolate import interp1d
 
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.solver_api import saarelma_connor
+from src.saarelma_connor_api import saarelma_connor
 from src.ped_width_proxy import ped_width
 
-def profiles_loop_solve(
+def ESCAPE(
     MHD_FP = None,
     KPROF_FP = None,
     kprof_loc = 'p',
@@ -22,6 +22,7 @@ def profiles_loop_solve(
     out_dir = None,
     ne_inner_bc = "neumann",
     ne_grad_bc_loc = "inner",
+    ig = None,
     model = "3D",
     solver_structure = "firedrake",
     x_res = 40,
@@ -35,13 +36,12 @@ def profiles_loop_solve(
     eped_tol_max = 1e-5,
     eped_iter_max = 50,
     kbm_gate_eps = 0.01,
-    kbm_treatment = "inline",
+    kbm_treatment = "average",
     picard_gate_mode = None,
     picard_max_it = 50,
     picard_rtol = 1e-8,
     picard_relax = 1.0,
-    EPEDNN_core = 'pfile',
-    ig = None,
+    EPEDNN_core = None,
     epednn_model = 'EPED1',
     verbose = False,
     verbose_sc = False,
@@ -66,12 +66,7 @@ def profiles_loop_solve(
     model : {'3D', '1D'}
         Which Saarelma-Connor model the loop solves each iteration.
         '3D' is the coupled three-equation system (n_e, n_FC, n_CX);
-        '1D' is the original single-equation model for n_e, whose n_FC /
-        n_CX are then derived from the converged n_e.  This counts
-        equations, not spatial dimensions -- both are 1D in space.
-        The kwargs that only one model accepts are added to SOLVE_KW
-        conditionally below; the rest of the loop is model-agnostic
-        because both solvers return the same result dictionary.
+        '1D' is the original single-equation model for n_e
     solver_structure : {'firedrake', 'scipy'}
         Discretisation backend, applies to either model.
     x_res : int
@@ -107,19 +102,6 @@ def profiles_loop_solve(
         Core to use for the EPEDNN model.
     verbose : bool
         Whether to print verbose output.
-
-    Returns
-    -------
-    psi_N_inner_boundary_new : float
-        Inner boundary of the pedestal in normalized poloidal flux.
-    T_prof_keV : float
-        Temperature profile in keV.
-    best_x : ndarray
-        Best x coordinates.
-    best_ne : ndarray
-        Best electron density profile.
-    pedestal_height : float
-        Final pedestal pressure height in MPa.
     """
 
     te_plot_profiles = []
@@ -129,17 +111,14 @@ def profiles_loop_solve(
 
     # Load in free parameters
     if free_params is None:
-        raise ValueError("Must specify free_params")
+        raise ValueError("Must specify Saarelma-Connor free parameters")
     alpha_crit = free_params['alpha_crit']
     C_KBM = free_params['C_KBM']
     De_chie_etg = free_params['De_chie_etg']
     nFC_x0 = free_params['nFC_x0']
-    ncx_x0_ratio = free_params['ncx_x0_ratio']
+    if model == '3D':
+        ncx_x0_ratio = free_params['ncx_x0_ratio']
 
-    # Setup solver parameters.  Both models share the keys below; the ones
-    # only one model (or one backend) accepts are added after, because
-    # `solve()` rejects a kwarg its target cannot take rather than silently
-    # dropping it.
     SOLVE_KW = dict(
         x_res=x_res,
         solver_structure=solver_structure,
@@ -157,24 +136,17 @@ def profiles_loop_solve(
         )
 
     if model == "3D":
-        # The neutrals are unknowns only in the coupled system, so the KBM
-        # gate treatment and the inner-BC switch belong to it alone.
         SOLVE_KW.update(
-            ne_inner_bc=ne_inner_bc,   # Saarelma A7 default; see dirichlet comparison below
+            ne_inner_bc=ne_inner_bc,
             kbm_treatment=kbm_treatment,
-            kbm_gate_eps=kbm_gate_eps, # 1e-3 minimum
+            kbm_gate_eps=kbm_gate_eps,
             picard_gate_mode=picard_gate_mode,
         )
 
     base_model = saarelma_connor(
             P_tot_e      = P_tot_e,
             species      = species,
-            alpha_crit   = alpha_crit,
-            C_KBM        = C_KBM,
-            De_chie_etg  = De_chie_etg,
             ne_x0        = ne_x0,
-            nFC_x0       = nFC_x0,
-            ncx_x0_ratio = ncx_x0_ratio,
             psi_N_inner_boundary = psi_N_inner,
             mhd_fp       = MHD_FP,
             kprof_fp     = KPROF_FP,
@@ -195,8 +167,7 @@ def profiles_loop_solve(
     # Clear outputs from any previous scan (including appended failure logs) and setup logging files
     equil_dir = Path(out_dir) / equil_tag
     equil_dir.mkdir(parents=True, exist_ok=True)
-
-    for path in equil_dir.iterdir():
+    for path in equil_dir.iterdir(): # clear output directory
         if path.is_dir():
             shutil.rmtree(path)
         else:
@@ -208,10 +179,6 @@ def profiles_loop_solve(
         print("------------------------------------------------")
         print(f"ESCAPE Loop Iter {eped_iter}")
 
-        # Run solver and save outputs.  bc_origin / initial_guess apply to
-        # both models (both route them through bc_ig_helpers, "manual EPEDNN
-        # loop" included); nCX_ic / nFC_ic are neutral initial conditions, so
-        # they only mean something when the neutrals are unknowns ('3D').
         if eped_iter == 0:
             SOLVE_KW['bc_origin'] = "p-file"
             SOLVE_KW['initial_guess'] = "tanh"
@@ -256,7 +223,6 @@ def profiles_loop_solve(
         psi_to_x = interp1d(psi_N_pres, x_grid_full, kind='linear',
                             bounds_error=False, fill_value='extrapolate')
         psi_ped_grid = np.linspace(psi_N_inner, 1.0, x_res)
-        # x_ped_grid = psi_to_x(psi_ped_grid)
 
         # --- Feed best profile into EPEDNN --------------------------------
         if eped_iter == 0:
@@ -423,9 +389,6 @@ def profiles_loop_solve(
                 psi_N_inner_boundary = psi_N_inner,
             )
         base_model.setup_epednn(model=epednn_model)
-
-    # gfile_pres_grid = base_model.psi_N_pres
-    # gfile_pres = base_model.pres_gfile
 
     if te_plot_profiles:
         red_blue = LinearSegmentedColormap.from_list('red_blue', ['red', 'blue'])

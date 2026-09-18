@@ -224,7 +224,7 @@ for mhd_fp, kprof_fp in equilibria:
 
         try:
             x_sol, ne_sol, dne_dx_sol = base_model.solve_sc(
-                implementation=solver,
+                solver_structure=solver,
                 x_res=x_res,
                 free_params=free_params,
                 eq6_form="complete",

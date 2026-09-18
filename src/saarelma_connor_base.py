@@ -23,6 +23,10 @@ except Exception as _firedrake_import_err:  # raise an error if Firedrake is not
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
 
+# Free parameters of the model (all four must be set before solving).
+FREE_PARAM_NAMES = ("alpha_crit", "De_chie_etg", "C_KBM", "nFC_x0")
+
+
 class SaarelmaConnorBase:
     """
 
@@ -38,32 +42,14 @@ class SaarelmaConnorBase:
 
     Parameters
     ----------
-    E_FC : float
-        Energy of Franck-Condon neutrals as defined in Mahdavi M.A., Maingi R., Groebner R.J., Leonard A.W., Osborne T.H. and Porter G. 2003 Phys. Plasmas 10 3984 J
     Z_i : int
         Z of ions
-    M_i : float
-        Proton mass, kg
-    M_e : float
-        Electron mass, kg
     P_tot_e : float
         Total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox, W
-    alpha_crit : float
-        FREE PARAMETER, Critical alpha value for onset of infinite-n ballooning instability, dimensionless
-    C_KBM : float
-        FREE PARAMETER, KBM diffusion coefficient, m^2/s
-    De_chie_etg : float
-        FREE PARAMETER, ETG diffusion coefficient, m^2/s
-    nFC_x0 : float
-        m^-3, FREE PARAMETER, Franck-Condon neutral density at the separatrix (boundary condition)
     ne_x0 : float
         m^-3, electron density at the separatrix (boundary condition)
     psi_N_inner_boundary : float
         psi_N to choose the inner boundary boundary condition. If None, inner boundary is chosen based on nFC_threshold and nCX_threshold.
-    nCX_x0 : float
-        m^-3, CX neutral density at the separatrix (boundary condition). If None, defaults to ncx_x0_ratio * nFC_x0
-    ncx_x0_ratio : float
-        ratio of nCX at the separatrix to nFC at the separatrix. Used if nCX_x0 is None
     nFC_threshold : float or None
         Fraction of the separatrix FC neutral density (nFC_x0) below which the
         inner boundary is placed.  Default 0.01 (1 %).  Set to None to disable. Not used if psi_N_inner_boundary!=None
@@ -88,34 +74,19 @@ class SaarelmaConnorBase:
         True if the poloidal flux is normalized by 2pi, False if the poloidal flux is not normalized by 2pi
     species : string
         Species of ions, currently supporting: D, D-T
-    error_check : bool
-        True if you want to use the exact published equations from Samuli's 2023 paper, False if you want to use the corrected equations
-    equations_to_solve : string
-        Equations to solve, currently supporting: 'coupled' (full 3-fluid system of ODEs), 'SC' (simplified 3-fluid system to one ODE)
     initial_guess : string
         Initial guess for the electron density profile, currently supporting: pfile
-    nCX_ic : string
-        Initial condition for the CX density profile, currently supporting: 'solve' (solve for the CX density profile), 'scale nFC' (scale the FC density profile by the specified initial condition ratio)
     verbose : bool
         True if verbose output is desired, False if verbose output is not desired
     """
     def __init__(
         self,
-        E_FC = 3 * 1.60218e-19, # J,
         Z_i = 1, # Z of ions
-        M_i = 1.673e-27, # kg, mass of hydrogen nuclei
-        M_e = 9.109e-31, # kg, mass of electron
         P_tot_e = None, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
-        alpha_crit = None, # FREE PARAMETER
-        C_KBM = None, # FREE PARAMETER
-        De_chie_etg = None, # FREE PARAMETER
-        nFC_x0 = None, # m^-3, FREE PARAMETER, Franck-Condon neutral density at the separatrix
         ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from pfile)
         psi_N_inner_boundary = 0.85, # normalized poloidal flux at the inner boundary (boundary condition); overridden by find_inner_boundary if nFC_threshold or nCX_threshold is set
-        nCX_x0=None, # m^-3, CX neutral density at the separatrix (Dirichlet BC at x = 0). If None, defaults to 0.1 * nFC_x0 (used in coupled solver)
-        ncx_x0_ratio = None, # ratio of nCX at the separatrix to nFC at the separatrix (used in coupled solver)
-        nFC_threshold = 0.01, # fraction of nFC at the separatrix below which the inner boundary is placed (None to disable)
-        nCX_threshold = 0.01, # fraction of nCX at the separatrix below which the inner boundary is placed (None to disable)
+        nFC_threshold = None, # fraction of nFC at the separatrix below which the inner boundary is placed (None to disable)
+        nCX_threshold = None, # fraction of nCX at the separatrix below which the inner boundary is placed (None to disable)
         mhd_loc = 'eqdsk', # location of MHD equilibrium parameters, currently supporting: Tokamaker eqdsk
         kprof_loc = 'pfile', # location of kinetic parameters, currently supporting: p-file
         mhd_fp = None, # filepath to MHD paramter file
@@ -125,10 +96,7 @@ class SaarelmaConnorBase:
         T_rat = 1,
         pol_norm = False, # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
         species = 'D', # species of ions, currently supporting: D, D-T
-        error_check = False, # check if Samuli's 2023 paper Eq. 15 is correct or not
-        equations_to_solve = 'coupled', # equations to solve, currently supporting: 'coupled', 'SC'
         initial_guess = 'pfile', # initial guess for the electron density profile, currently supporting: pfile, linear
-        nCX_ic="solve",
         regime_flag = 'PT H-mode', # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
         x_method = 'radas', # method to use for the cross-section rates, currently supporting: 'adas', 'radas'
         verbose = False,
@@ -136,8 +104,6 @@ class SaarelmaConnorBase:
 
         # User-specified flags
         self.regime_flag = regime_flag
-        self.equations_to_solve = equations_to_solve
-        self.error_check = error_check
         self.T_rat_flag = T_rat_flag
         self.T_rat = T_rat
         self.verbose = verbose
@@ -150,14 +116,27 @@ class SaarelmaConnorBase:
         self.initial_guess = initial_guess
 
         # User-specified thresholds for the inner boundary
-        self.nFC_threshold = nFC_threshold
-        self.nCX_threshold = nCX_threshold
+        if psi_N_inner_boundary is not None:
+            self.psi_N_inner_boundary = float(psi_N_inner_boundary)
+            self.nFC_threshold = None
+            self.nCX_threshold = None
+        else:
+            if nFC_threshold is not None:
+                self.nFC_threshold = nFC_threshold
+            else: 
+                raise NotImplementedError("nFC_threshold must be specified")
+            if nCX_threshold is not None:
+                self.nCX_threshold = nCX_threshold
+            else:
+                raise NotImplementedError("nCX_threshold must be specified")
 
-        self.ncx_x0_ratio = ncx_x0_ratio
 
+        # Other constants
+        E_FC = 3 * 1.60218e-19, # J, Energy of Franck-Condon neutrals as defined in Mahdavi M.A., Maingi R., Groebner R.J., Leonard A.W., Osborne T.H. and Porter G. 2003 Phys. Plasmas 10 3984 J
         self.mu0 = 4 * np.pi * 10**-7 # N/A**2, vacuum magnetic permeability constant
         self.P_tot_e = P_tot_e
-
+        M_e = 9.109e-31, # kg, mass of electron
+        M_i = 1.673e-27, # kg, mass of hydrogen nuclei
         self.M_i = M_i
         if species == 'D':
             self.M_eff = 2.0
@@ -166,7 +145,7 @@ class SaarelmaConnorBase:
         else:
             assert False, 'species must be D or D-T'
 
-        # Load in quantities
+        # Load in equilibrium and kinetic profile quantities
         self.mhd_load(mhd_loc,mhd_fp) # load in MHD quantities
         self.kprof_load(kprof_loc,kprof_fp,manual_profs=manual_profs) # load in kinetic quantities
         
@@ -187,9 +166,6 @@ class SaarelmaConnorBase:
 
         # Load in cross-section rates, which are only a function of temperature if we use an average density (predictive models could provide a guess density)
         self.cross_section_rates(species=species,x_method=x_method) # load in cross-sections
-        # self.S_i = self.sigma_i # m^3/s, ionization <sigma v> profile on psi_Te_eval (scd_adas already returns the rate coefficient)
-        # self.S_cx = self.sigma_cx * self.V_th_i # m^3/s, CX rate coefficient profile on psi_Te_eval
-
 
         # Setup for diffusion coefficient that does not include free parameters and n_e
         self.c_s = (self.e_i * self.T_e * 1e3 / (M_i * self.M_eff)) ** 0.5 # m/s, cs = (e*T_e/mD)^1/2, T_e in keV -> eV via 1e3, as defined in W. Guttenfelder et al 2021 Nucl. Fusion 61 056005
@@ -198,7 +174,6 @@ class SaarelmaConnorBase:
         self.rho_s = self.fsa(self.rho_s,flux_surfaces='T_e') # m, known on each flux surface, outputs nan for psi_N < 0.01 or psi_N > 0.99
         valid = ~np.isnan(self.rho_s)
         self.rho_s = interp1d(self.psi_Te_eval[valid], self.rho_s[valid], kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_Te_eval) # removes nan values from rho_s
-        self.mu0 = 4 * np.pi * 10**-7 # N/A**2, vacuum magnetic permeability constant
 
         # Interpolate T_e, c_s, rho_s from psi_Te_eval onto the pressure psi_N grid
         T_e_pres = interp1d(self.psi_Te_eval, self.T_e, kind='linear',
@@ -239,35 +214,14 @@ class SaarelmaConnorBase:
         self.D_ETG_x = P_tot_e / (self.S_plasma * abs(grad_Te)) # evaluated at each psi_N_pres, not including free parameter De_chie_etg and n_e
         self.D_NEO = 0.05 * (self.c_s * self.rho_s**2) / self.a
 
-        # Outer boundary condition for electrons and FC neutrals
+        # Outer Dirichlet boundary condition for electrons
         if ne_x0 is None:
             self.ne_x0 = self.n_e_pfile[-1]
             self.ne_x0_manual = False
         else:
             self.ne_x0 = ne_x0
             self.ne_x0_manual = True
-        if nFC_x0 is None:
-            nFC_x0 = self.n_e_pfile[-1] * 1e-4
-            if self.verbose:
-                print('nFC_x0 = ', nFC_x0)
 
-        # Set free parameters
-        self.update_free_params(
-            alpha_crit, C_KBM, De_chie_etg, nFC_x0,
-            nFC_threshold=nFC_threshold,
-            nCX_threshold=nCX_threshold,
-            psi_N_inner_boundary=psi_N_inner_boundary,
-            ncx_x0_ratio=ncx_x0_ratio,
-        )
-
-        if equations_to_solve == 'coupled':
-            if nCX_x0 is not None:
-                self.nCX_x0 = nCX_x0
-            elif ncx_x0_ratio is not None:
-                self.ncx_x0_ratio * self.nFC_x0 # set nCX boundary condition
-            else:
-                raise ValueError("nCX_x0 or ncx_x0_ratio must be specified")
-            self._fd_cache = {}
 
     def calc_pressure_quantities_sc(self,n_e,x):
         """Calculate the pressure, alpha, and D_KBM on the psi_N_pres grid."""
@@ -284,7 +238,7 @@ class SaarelmaConnorBase:
             self.C_KBM*(_alpha-self.alpha_crit)*(self.c_s*self.rho_s**2)/self.a,
             0)
 
-    def update_free_params(self, alpha_crit, C_KBM, De_chie_etg, nFC_x0,
+    def update_free_params(self, alpha_crit=None, C_KBM=None, De_chie_etg=None, nFC_x0=None,
                            nFC_threshold=None, nCX_threshold=None,
                            psi_N_inner_boundary=None,
                            ncx_x0_ratio=None,
@@ -329,10 +283,18 @@ class SaarelmaConnorBase:
         """
         
         # Set/update free parameters alpha_crit, C_KBM, De_chie_etg, nFC_x0, psi_N_inner_boundary
-        self.alpha_crit = alpha_crit
-        self.C_KBM = C_KBM
-        self.De_chie_etg = De_chie_etg
-        self.nFC_x0 = nFC_x0
+        if alpha_crit is not None:
+            self.alpha_crit = alpha_crit
+        if C_KBM is not None: 
+            self.C_KBM = C_KBM
+        if De_chie_etg is not None:
+            self.De_chie_etg = De_chie_etg
+        if nFC_x0 is not None:
+            self.nFC_x0 = nFC_x0
+        if ncx_x0_ratio is not None:
+            self.ncx_x0_ratio = ncx_x0_ratio
+            self.nCX_x0 = self.ncx_x0_ratio * self.nFC_x0
+
         if psi_N_inner_boundary is not None:
             self.psi_N_inner_boundary = float(psi_N_inner_boundary)
             self.nFC_threshold = None
@@ -342,9 +304,6 @@ class SaarelmaConnorBase:
                 self.nFC_threshold = nFC_threshold
             if nCX_threshold is not None:
                 self.nCX_threshold = nCX_threshold
-        if ncx_x0_ratio is not None:
-            self.ncx_x0_ratio = ncx_x0_ratio
-            self.nCX_x0 = self.ncx_x0_ratio * self.nFC_x0
 
         if ne_inner is not None:
             self.ne_inner = ne_inner
@@ -359,8 +318,55 @@ class SaarelmaConnorBase:
                 if hasattr(self, _attr):
                     delattr(self, _attr)
 
-        if self.equations_to_solve == 'coupled':
-            self.invalidate_firedrake_cache()
+        self.invalidate_firedrake_cache()
+
+
+    def check_free_params(self):
+        """Raise if any of the four free parameters is unset.
+
+        The model is undefined without all of ``FREE_PARAM_NAMES``; catching
+        it here gives a readable error instead of a ``None`` propagating into
+        ``construct_C_ETG`` or the KBM gate.
+        """
+        missing = [n for n in FREE_PARAM_NAMES
+                   if getattr(self, n, None) is None]
+        if missing:
+            raise ValueError(
+                "The Saarelma-Connor model needs all four free parameters; "
+                f"missing: {', '.join(missing)}.  Set them on the "
+                "constructor, with update_free_params(), or pass "
+                "free_params={'alpha_crit': ..., 'De_chie_etg': ..., "
+                "'C_KBM': ..., 'nFC_x0': ...} to the solver."
+            )
+
+    def apply_free_params(self, free_params=None):
+        """Optionally update the free parameters, then validate them.
+
+        Shared by every solver entry point so that ``free_params`` means the
+        same thing everywhere.  Going through :meth:`update_free_params`
+        (rather than assigning the attributes directly) is what keeps the
+        derived quantities -- ``nCX_x0``, the inner-boundary thresholds, the
+        cached Firedrake objects -- consistent with the new values.
+
+        Parameters
+        ----------
+        free_params : dict or None
+            Any subset of ``{'alpha_crit', 'C_KBM', 'De_chie_etg',
+            'nFC_x0'}``; omitted entries keep their current value.  Any
+            further keyword accepted by :meth:`update_free_params` (e.g.
+            ``psi_N_inner_boundary``, ``ne_x0``) may be included and is
+            forwarded.  None skips the update and only validates.
+        """
+        if free_params is not None:
+            fp = dict(free_params)
+            self.update_free_params(
+                fp.pop("alpha_crit", self.alpha_crit),
+                fp.pop("C_KBM", self.C_KBM),
+                fp.pop("De_chie_etg", self.De_chie_etg),
+                fp.pop("nFC_x0", self.nFC_x0),
+                **fp,
+            )
+        self.check_free_params()
 
 
     def inner_boundary_limits(self, outer_threshold=None, safety_margin=0.01,
@@ -2945,22 +2951,6 @@ class SaarelmaConnorBase:
             else:
                 assert False, 'EPEDNN_betan method not supported'
 
-                # In the future, the code below will be stitched with a core simulation
-                """
-                T_tot_xdofs = self.T_e_xdofs
-                if self.T_rat_flag: # use both electron and ion temperatures, neglect neutrals
-                    T_i_xdofs = np.interp(self.x_sol, self.x_init, self.T_i_pres)
-                    T_tot_xdofs = T_tot_xdofs + T_i_xdofs
-                ne = self.ne_sol + core_n_e
-                pressure = self.ne_sol * T_tot_xdofs * 1.60218e-19  # Pa, assuming quasi-neutrality
-
-                psi_N_xdofs = np.interp(self.x_sol, self.x_init, self.psi_N_pres) # convert x_dofs to psi_N
-                pressure = np.interp(self.psi_N_pres, psi_N_xdofs, pressure) # Pa on psi_N_pres grid
-
-                self.volavgP = (simpson(pressure * dV_dpsi, self.psi_N_pres)
-                                / simpson(dV_dpsi, self.psi_N_pres))
-                """
-
             pressure = (n_e_plasma * T_tot_plasma) * constants.e # Pa
 
         # Calculate pressure and volavgP
@@ -3416,11 +3406,6 @@ class SaarelmaConnorBase:
     def solve(self, model='3D', **kwargs):
         """Solve the pedestal problem with the chosen physics model.
 
-        One entry point for both models, so callers can switch between them
-        by changing a string rather than the class they instantiate.  Both
-        return the same dictionary schema (see :meth:`_build_result_dict`),
-        so downstream code does not branch either.
-
         Parameters
         ----------
         model : {'3D', '1D'}
@@ -3450,21 +3435,9 @@ class SaarelmaConnorBase:
         model = self._normalise_model(model)
         kwargs = dict(kwargs)
 
-        # One spelling for the backend across both models: the coupled
-        # solver calls it `solver_structure`, solve_sc calls it
-        # `implementation`.
         backend = kwargs.pop('solver_structure', None)
-        backend_alias = kwargs.pop('implementation', None)
-        if (backend is not None and backend_alias is not None
-                and backend != backend_alias):
-            raise ValueError(
-                f"solve() got conflicting backends: solver_structure="
-                f"{backend!r} and implementation={backend_alias!r}. Pass one."
-            )
         if backend is None:
-            backend = backend_alias
-        if backend is None:
-            backend = 'firedrake'
+            raise ValueError("need to define solver structure")
 
         self._check_solve_kwargs(model, backend, kwargs)
 

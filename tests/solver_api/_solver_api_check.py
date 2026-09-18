@@ -100,6 +100,8 @@ def check_kwarg_validation():
         ("1D", "firedrake", {"bvp_tol": 1e-6}, "not with solver_structure='firedrake'"),
         ("1D", "scipy", {"fe_degree": 2}, "not with solver_structure='scipy'"),
         ("3D", "firedrake", {"x_ress": 20}, "not an argument of any solver"),
+        ("1D", "scipy", {"implementation": "firedrake"},
+         "not an argument of any solver"),
     ]
     for model, backend, kwargs, fragment in cases:
         try:
@@ -109,14 +111,7 @@ def check_kwarg_validation():
         else:
             raise AssertionError(f"solve(model={model!r}, {kwargs}) did not raise")
 
-    try:
-        m.solve(model="1D", solver_structure="scipy", implementation="firedrake")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("conflicting solver_structure / implementation did not raise")
-
-    print(f"  {len(cases) + 2} rejection cases raise with the expected message")
+    print(f"  {len(cases) + 1} rejection cases raise with the expected message")
 
 
 def check_solves():

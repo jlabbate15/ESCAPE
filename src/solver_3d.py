@@ -1,92 +1,7 @@
-"""Non-dimensional Firedrake solver for the coupled three-equation
-Saarelma-Connor pedestal model.
+"""Non-dimensional Firedrake and scipy solvers for the coupled three-equation
+(n_e, n_FC, n_CX) Saarelma-Connor pedestal model ("3D").
 
-Implements the foundational non-dimensionalisation derived in
-Appendix A.8 of docs/Labbate_APAM9301_Final_06152026.tex:
-
-    L  = |x_inner|                length scale (m)
-    n0 = ne_x0                    density scale (m^-3)
-    T0 = T_e(0) + T_i(0)          energy scale (J)
-    tau = 1 / (n0 * S0)           time scale (s),   S0 = S_i(0)
-
-with derived scales
-    [V]_0 = L / tau = L * n0 * S0          velocity (m/s)
-    [D]_0 = L^2 / tau = L^2 * n0 * S0      diffusivity (m^2/s)
-    [p]_0 = n0 * T0                        pressure (Pa).
-
-Hatted variables:
-    hat_x = x / L,                     hat_x in [-1, 0]
-    hat_n_e = n_e / n0,                hat_n_e(0) = 1
-    hat_n_FC = <n_FC> / n0,            hat_n_FC(0) = nFC_x0/n0
-    hat_n_CX = <n_CX> / n0             hat_n_CX(0) = nCX_x0/n0
-    hat_T = (T_e + T_i) / T0
-    hat_S_i = S_i / S0,   hat_S_CX = S_CX / S0
-    hat_V_FC = |V_FC| / [V]_0,   hat_V_CX = |V_CX| / [V]_0
-    hat_g = <|grad r|^2>           (already dimensionless)
-
-Dimensionless transport coefficients:
-    hat_C_ETG = C_ETG / (L^2 * n0^2 * S0)
-    hat_D_NEO = D_NEO / (L^2 * n0 * S0)
-    hat_A_KBM = A_KBM / (L^2 * n0 * S0)
-    hat_B_KBM = B_KBM * T0 / (L^3 * S0)
-
-The dimensionless residuals (Eqs. (eq:weak-hat-A8),
-(eq:weak-hat-nFC-A8), (eq:weak-hat-nCX-A8) in App. A.8):
-
-    F1_hat: int_{-1}^{0} hat_g [ hat_C_ETG/hat_n_e * hat_n_e'
-              + hat_A_KBM * hat_n_e'
-              + hat_B_KBM * hat_T * (hat_n_e')^2
-              + hat_B_KBM * hat_n_e * hat_dT_dxhat * hat_n_e'
-              + hat_D_NEO * hat_n_e' ] v_e' dxhat
-            - int_{-1}^{0} hat_n_e * hat_S_i * (hat_n_FC + hat_n_CX) v_e dxhat
-            + delta_N * hat_g(-1) * hat_D|_{-1} * hat_dne_dx_inner * v_e(-1) = 0
-
-    F2_hat: int_{-1}^{0} [ hat_V_FC * d/dxhat[ f_FC * hat_g * hat_n_FC ]
-              - hat_n_e * (hat_S_i + hat_S_CX) * hat_n_FC ] v_F dxhat = 0
-
-    F3_hat: int_{-1}^{0} [ d/dxhat[ hat_V_CX * f_CX * hat_g * hat_n_CX ]
-              - hat_n_e * (hat_S_i * hat_n_CX - 0.5 * hat_S_CX * hat_n_FC)
-              ] v_C dxhat = 0
-
-Placement of the n_e gradient boundary condition
-================================================
-``ne_grad_bc_loc`` selects which end of the domain carries the
-prescribed dn_e/dx.
-
-``"inner"`` (default, unchanged behaviour)
-    Dirichlet n_e(0) = ne_x0 at the separatrix, and at hat_x = -1
-    either Dirichlet n_e(x_inner) or the Neumann flux above
-    (``ne_inner_bc``).  One condition at each end.
-
-``"outer"``
-    Both conditions sit at the separatrix -- Dirichlet n_e(0) = ne_x0
-    *and* Neumann dn_e/dx|_{x=0} = dne_dx_outer -- and the inner
-    boundary is left completely free.  This is the boundary-condition
-    set of Saarelma et al. 2023 Sec. 2.3, where the separatrix density
-    and its gradient (their Eq. (20), dn_e/dx|_0 = -n_e(0) /
-    sqrt(D_SOL tau_par)) are the specified data and nothing is imposed
-    at the pedestal top.
-
-    A Galerkin discretisation cannot impose both directly: the strong
-    Dirichlet condition at boundary id 2 makes v_e(0) = 0, so a ds(2)
-    flux term vanishes identically.  The equivalent well-posed
-    statement is that the *inner* flux is an unknown Lagrange
-    multiplier fixed by the separatrix-gradient constraint, and that is
-    what is solved here -- by secant iteration on the ds(1) slope
-    ``hat_dne_dx_inner`` until hat_n_e'(0) matches the prescribed
-    value.  Shooting on that one scalar (rather than enlarging the
-    mixed space by a real-space multiplier) leaves the function space,
-    the Picard loop and the analytic-neutral path untouched.
-    Diagnostics land in ``self.grad_bc_info``.
-
-Solver entry point: ``saarelma_connor.solve_coupled_nondim(...)``, or
-equivalently ``saarelma_connor.solve(model='3D', ...)``.  Both return the
-common result dictionary described in
-:meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
-
-This module contributes :class:`NondimSolverMixin` to the single public
-class :class:`src.solver_api.saarelma_connor`; all equilibrium / kinetic /
-cross-section setup comes from :class:`src.solver.SaarelmaConnorBase`.
+Full documentation: docs/solver_3d_documentation.tex.
 """
 
 import warnings
@@ -115,33 +30,10 @@ from src import bc_ig_helpers as bcig
 _EV2J = 1.60218e-19
 
 
-class NondimSolverMixin:
-    """Non-dimensional coupled three-equation solver ("3D" model).
-
-    A mixin over :class:`src.solver.SaarelmaConnorBase`; it is combined
-    with the base and :class:`src.solver_sc.SCSolverMixin` into the single
-    public :class:`src.solver_api.saarelma_connor`.  It defines no
-    ``__init__`` -- every attribute it reads is set by the base
-    constructor -- and it overrides nothing, so it only ever adds the
-    ``*_nondim`` methods below.
-
-    The solver assembles and solves the dimensionless residuals derived in
-    Appendix~A.8 of the paper rather than their SI counterparts.
-
-    Reference scales are computed lazily inside :meth:`solve_coupled`
-    (after ``setup_solver_grids`` and any inner-boundary search are done).
-    They are stored as instance attributes:
-
-        self._L_nd, self._n0_nd, self._T0_nd, self._S0_nd  : 4 free scales
-        self._tau_nd, self._V0_nd, self._D0_nd             : derived scales
-
-    After convergence the SI-unit profiles are recovered and stored on
-    the same attributes (``self.x_sol``, ``self.ne_sol``, ``self.nFC_sol``,
-    ``self.nCX_sol``) as the parent solver, so all downstream code
-    (plotting, EPED feed, etc.) keeps working without modification.
-    The non-dimensional profiles are also kept available as
-    ``self.hat_x_sol``, ``self.hat_ne_sol``, ``self.hat_nFC_sol``,
-    ``self.hat_nCX_sol`` for diagnostics.
+class ThreeDSolverMixin:
+    """Mixin adding the non-dimensional coupled three-equation solver to
+    saarelma_connor. SI results go on x_sol/ne_sol/nFC_sol/nCX_sol and non-dim
+    ones on hat_*_sol.
     """
 
     # ------------------------------------------------------------------
@@ -149,19 +41,8 @@ class NondimSolverMixin:
     # ------------------------------------------------------------------
 
     def _set_nondim_scales(self, verbose=False):
-        """Compute and cache the four free reference scales of
-        Eq.~(eq:nondim-scales-A8) plus the derived scales.
-
-        Convention (see App.~A.8):
-
-            L  = |x_inner|              (m)
-            n0 = ne_x0                  (m^-3)         -- separatrix value
-            T0 = (T_e(0)+T_i(0)) * J/eV (J)            -- separatrix value
-            S0 = S_i(0)                 (m^3/s)        -- separatrix value
-            tau    = 1 / (n0 * S0)      (s)
-            [V]_0  = L / tau            (m/s)
-            [D]_0  = L^2 / tau          (m^2/s)
-
+        """Compute and cache the reference scales L, n0, T0, S0 and the derived
+        tau, [V]_0, [D]_0 (App. A.8).
         """
         if not hasattr(self, "x_inner") or self.x_inner is None:
             raise RuntimeError(
@@ -228,14 +109,8 @@ class NondimSolverMixin:
         return np.asarray(hat_x) * self._L_nd
 
     def _interp_si_to_hat(self, hat_x_dofs, si_array_on_xinit):
-        """Evaluate an SI quantity defined on ``self.x_init`` (sorted)
-        at the dimensionless mesh DOFs ``hat_x_dofs``.
-
-        Returns the SI value at L * hat_x_dofs (i.e. *no* rescaling).
-        Callers rescale to hat-units as needed.
-
-        This basically just interpolates the SI array to the x_dofs grid.
-        Because x_dofs is the same size as hat_x_dofs, once you are on x_dofs you don't need to interpolate again.
+        """Interpolate an SI array on ``self.x_init`` onto the hat-x DOFs,
+        returning SI values (no rescaling).
         """
         x_si = self._from_hat_x(hat_x_dofs)
         return np.interp(x_si, self.x_init, np.asarray(si_array_on_xinit)) # interpolates x_init to x_dofs grid
@@ -245,16 +120,9 @@ class NondimSolverMixin:
     # ------------------------------------------------------------------
 
     def _ensure_firedrake_discretization_nondim(self, mesh_n, fe_degree, force=False):
-        """Build (or reuse) the dimensionless mesh on hat_x in [-1, 0]
-        and the equilibrium-only non-dim coefficient Functions.
-
-        Cache keys live alongside the parent's ``self._fd_cache`` keys
-        but use a ``_nd`` suffix to avoid colliding with any cached
-        SI-version state.
-
-        Returns
-        -------
-        mesh, V, W, hat_x_dofs, hat_g_fd, hat_Si_fd, hat_Scx_fd, hat_Vcx_fd
+        """Build (or reuse) the hat-x mesh, function spaces and frozen non-dim
+        coefficient Functions; returns (mesh, V, W, hat_x_dofs, hat_g_fd,
+        hat_Si_fd, hat_Scx_fd, hat_Vcx_fd).
         """
         if not _FIREDRAKE_AVAILABLE:
             raise ImportError(
@@ -343,51 +211,10 @@ class NondimSolverMixin:
     def calc_pressure_quantities_nondim(self, hat_n_e,
                                         gate_mode=None,
                                         hat_x_dofs=None):
-        """Non-dim version of :meth:`saarelma_connor.calc_pressure_quantities`.
-
-        Computes the pedestal-averaged Connor-Hastie alpha in physical
-        (SI) units (because alpha is a physical quantity defined by an
-        SI integral) and then rescales the resulting transport
-        contributions A_KBM, B_KBM, D_KBM into their dimensionless
-        counterparts hat_A_KBM, hat_B_KBM, hat_D_KBM.
-
-        Parameters
-        ----------
-        hat_n_e : array_like, shape (n_dofs,)
-            Dimensionless electron density at the mesh DOFs (DOF order,
-            not necessarily monotonic in hat_x).
-        gate_mode : {None, "average", "majority", "local"}
-            How the KBM on/off gate is decided:
-
-            ``"average"``
-                Gate on the pedestal-averaged alpha:
-                ``gate = mean(alpha) > alpha_crit`` (single on/off for
-                the whole grid).  When on, Saarelma et al. (2023) Eq. 25
-                diffusivity is used on the whole grid:
-                ``D_KBM = (alpha_bar - alpha_crit) * G_KBM``.
-            ``"majority"``
-                Gate on a majority vote of the local alpha: on for the
-                whole grid iff more than half of the pedestal grid
-                points have alpha > alpha_crit.  When on, the local
-                (A, B) KBM coefficient structure is applied at every
-                point (no pointwise gate).
-            ``"local"``
-                Pointwise gate (legacy behaviour): each grid point is
-                gated by its own local alpha.
-
-        Sets
-        ----
-        self._hat_A_KBM, self._hat_B_KBM, self._hat_D_KBM : ndarray
-            Dimensionless KBM coefficients in DOF order.
-        self.alpha_bar_ped : float
-            Pedestal-averaged alpha (same definition as the parent).
-        self.alpha_frac_above : float
-            Fraction of pedestal grid points with alpha > alpha_crit.
-        self.kbm_gate_on : bool or ndarray
-            Gate state: a scalar bool for "average"/"majority", a
-            pointwise bool array (DOF order) for "local".
-        self.alpha_local_ped : ndarray
-            Local Connor-Hastie alpha in DOF order (diagnostic).
+        """Compute the Connor-Hastie alpha in SI from ``hat_n_e`` and apply the
+        KBM gate (``gate_mode`` 'average', 'majority' or 'local'). Stores the
+        dimensionless _hat_A_KBM, _hat_B_KBM, _hat_D_KBM and the gate
+        diagnostics.
         """
         # The Firedrake path leaves this None and uses the cached FE DOFs;
         # the scipy path passes its own (ascending) collocation grid.
@@ -476,54 +303,9 @@ class NondimSolverMixin:
     # ------------------------------------------------------------------
 
     def _solve_neutrals_analytic_nondim(self, hat_ne_dofs, n_sub=4001):
-        """Solve the FC and CX neutral equations exactly for a *given*
-        electron density, on a dense sub-grid that resolves the neutral
-        ionisation boundary layer even when the FE mesh does not.
-
-        Both neutral equations are first-order linear ODEs in x once
-        ``n_e(x)`` is frozen, so they admit integrating-factor solutions
-        that are positive by construction (no CG oscillations, no
-        negative densities).  This is the same mathematics as the
-        ``nFC_ic='solve'`` / ``nCX_ic='solve'`` initial-guess branches,
-        but evaluated on ``n_sub`` points instead of the FE DOFs and
-        including the |grad r|^2 / form-factor variation exactly.
-
-        FC neutrals (Saarelma-Connor Eq. 9):
-
-            |V_FC| d/dx [ f_FC g n_FC ] = n_e (S_i + S_CX) n_FC
-
-        With u = f_FC g n_FC and tau = -x (inward distance >= 0):
-
-            u(tau) = u(0) * exp( -int_0^tau  n_e (S_i+S_CX)
-                                             / (|V_FC| f_FC g)  dtau' )
-
-        CX neutrals (Eq. 10), with w = |V_CX| f_CX g n_CX:
-
-            dw/dtau = -P(tau) w + Q(tau),
-            P = n_e S_i / (|V_CX| f_CX g),
-            Q = (1/2) n_e S_CX n_FC,
-
-        integrated with a per-step exponential integrator
-        (w_{k+1} = w_k e^{-P dtau} + (Q/P)(1 - e^{-P dtau})), which is
-        unconditionally stable and positivity-preserving regardless of
-        how stiff P dtau is.
-
-        Parameters
-        ----------
-        hat_ne_dofs : array_like
-            Dimensionless n_e at the FE mesh DOFs (DOF order).
-        n_sub : int, default 4001
-            Number of points of the dense integration sub-grid on
-            [x_inner, 0].  Choose so that the sub-grid spacing is well
-            below the minimum neutral penetration depth
-            lambda = |V_FC| / (n_e (S_i + S_CX)).
-
-        Returns
-        -------
-        hat_nFC_dofs, hat_nCX_dofs : ndarray
-            Dimensionless neutral densities at the FE mesh DOFs (DOF
-            order), interpolated in log-space from the sub-grid so the
-            boundary-layer decay is preserved.
+        """Solve the FC and CX neutral equations exactly for a frozen n_e on a
+        dense ``n_sub``-point sub-grid; returns hat_nFC and hat_nCX at the FE
+        DOFs.
         """
         hat_x_dofs = self._fd_cache["hat_x_dofs"]
         x_dofs = self._from_hat_x(hat_x_dofs)          # m, DOF order
@@ -593,32 +375,9 @@ class NondimSolverMixin:
         alpha_crit_c, gate_eps_c,
         boundary=False, hat_dne_dx_inner_c=None,
     ):
-        """Build the inline (trial-dependent) UFL expressions for the
-        Connor-Hastie ``alpha``, the smoothed KBM gate, and the
-        dimensionless KBM coefficients ``hat_A_KBM`` and ``hat_B_KBM``.
-
-        Mathematics (see App.~A.7--A.8 of docs/Labbate_APAM9301_Final):
-
-            alpha(hat_x, hat_n_e)
-                = hat_alpha_nodp(hat_x) *  d/dhat_x [ hat_n_e * hat_T ]
-                = hat_alpha_nodp * ( hat_T * hat_n_e' + hat_n_e * hat_T' ),
-
-            gate_eps(z)
-                = 0.5 * (1 + tanh(z / gate_eps))    ~ Heaviside(z),
-
-            hat_A_KBM(hat_n_e) = - gate_eps(alpha - alpha_crit) * alpha_crit * hat_G_KBM,
-            hat_B_KBM(hat_n_e) = + gate_eps(alpha - alpha_crit) * hat_alpha_nodp * hat_G_KBM.
-
-        These are full UFL expressions so SNES (Newton) automatically
-        captures their dependence on the trial ``hat_n_e``.
-
-        Parameters
-        ----------
-        boundary : bool, default False
-            If True, use the prescribed inner-boundary slope
-            ``hat_dne_dx_inner_c`` for hat_n_e' inside ``alpha`` (this
-            is needed in the Neumann-flux ds(1) contribution to F1).
-            Otherwise use the volume trial derivative ``hat_ne.dx(0)``.
+        """UFL expressions for alpha, the tanh-smoothed KBM gate, and hat_A_KBM
+        / hat_B_KBM as functions of the trial hat_n_e (``boundary=True`` uses
+        the ds(1) slope).
         """
         
         if boundary:
@@ -641,24 +400,8 @@ class NondimSolverMixin:
             hat_Si_fd, hat_nFC, hat_nCX,
             v_e, hat_dne_dx_inner_c,
             hat_A_KBM_bc_term=None, hat_B_KBM_bc_term=None):
-        """Dimensionless n_e weak form -- Eq. (eq:weak-hat-A8) of App. A.8.
-
-        Integrals are over hat_x in [-1, 0] (the Firedrake mesh).  The
-        Neumann boundary contribution at hat_x = -1 (boundary id 1) is
-        always present -- the prescribed inner flux in the "inner"
-        pathway, the free (secant-driven) inner flux in the "outer"
-        pathway -- evaluated using the Dirichlet-type expansion of
-        hat_D consistent with the parent solver.
-
-        ``hat_A_KBM_term`` and ``hat_B_KBM_term`` are UFL expressions
-        (or Functions) carrying the KBM coefficients.  In
-        the ``"inline"`` path they are UFL expressions that depend on
-        the trial ``hat_n_e``.
-
-        ``hat_A_KBM_bc_term`` / ``hat_B_KBM_bc_term`` are the analogous
-        expressions evaluated with the prescribed Neumann slope (used
-        only inside the ds(1) boundary integrand).  If left None the
-        volume expressions are reused.
+        """Dimensionless n_e weak form (App. A.8 Eq. weak-hat-A8), including
+        the ds(1) inner-flux term.
         """
         if hat_A_KBM_bc_term is None:
             hat_A_KBM_bc_term = hat_A_KBM_term
@@ -722,34 +465,9 @@ class NondimSolverMixin:
         self, F, u, bcs, snes_params,
         hat_ne_curr, hat_slope_c, hat_target, tol, max_it, verbose,
     ):
-        """Solve ``F == 0`` subject to hat_n_e'(0) == ``hat_target``.
-
-        The inner boundary carries no condition of its own in this mode,
-        so its flux slope ``hat_slope_c`` (the ds(1) Constant, which the
-        inline-KBM boundary terms share) is the free unknown.  A damped
-        secant iteration drives the residual
-
-            r(s) = hat_n_e'(0; s) - hat_target
-
-        to zero.  The seed is the inner slope, which can be far from the
-        answer (the free flux routinely lands on the other side of zero)
-        and the system need not be solvable for every slope in between,
-        so each step is capped at four times the previous accepted one
-        and backtracked, halving, whenever SNES fails.
-
-        Every attempt restarts from the *same* reference state (the
-        iterate this routine was handed) rather than from the previous
-        attempt's answer.  That is deliberate.  Chaining warm starts
-        makes r(s) path dependent, and once two slopes are close the warm
-        start already passes SNES's convergence test, so it returns at
-        iteration zero with the density untouched and the secant sees a
-        bit-identical residual for two different slopes and concludes the
-        gradient does not respond at all.  Restarting from a fixed
-        reference makes r(s) a genuine function of s, which is what the
-        secant needs; the cost is a few more Newton steps per attempt.
-
-        Returns a diagnostics dict (also stored by the caller in
-        ``self.grad_bc_info``).
+        """Secant-iterate the free ds(1) slope ``hat_slope_c`` until
+        hat_n_e'(0) == ``hat_target``, restarting each attempt from the same
+        reference state; returns a diagnostics dict.
         """
         # ds(2) has unit measure in 1D, so this assembles to hat_n_e'(0).
         grad_sep_form = hat_ne_curr.dx(0) * ds(2)
@@ -876,14 +594,8 @@ class NondimSolverMixin:
         return s
 
     def _scipy_coefficients_nondim(self):
-        """Linear interpolants of the frozen non-dim coefficients in hat_x.
-
-        Every coefficient lives on ``self.x_init`` in SI; each returned
-        callable takes hat_x and applies ``x = L * hat_x`` internally, so
-        the ODE right-hand side never has to think about units.  Linear
-        interpolation matches the ``np.interp`` sampling the Firedrake
-        path uses to fill its coefficient Functions, so the two
-        discretisations see the same coefficient reconstruction.
+        """Linear interpolants (callables of hat_x) of the frozen non-dim
+        coefficients for the scipy path.
         """
         def _mk(arr, scale=1.0):
             f = interp1d(self.x_init, np.asarray(arr, dtype=float) * scale,
@@ -905,6 +617,7 @@ class NondimSolverMixin:
 
     def solve_coupled_nondim_scipy(self,
                                    x_res=200,
+                                   free_params=None,
                                    ne_inner_bc="neumann",
                                    ne_grad_bc_loc="inner",
                                    bc_origin=None,
@@ -926,86 +639,10 @@ class NondimSolverMixin:
                                    scale_ne_inner=None,
                                    ne_floor=1e-8,
                                    verbose=None):
-        """scipy (``solve_bvp``) solver for the coupled three-equation model.
-
-        Same physics, non-dimensionalisation and boundary conditions as
-        :meth:`solve_coupled_nondim`, discretised by collocation instead
-        of finite elements.  Reached through
-        ``solve_coupled_nondim(solver_structure="scipy", ...)``.
-
-        Formulation
-        ===========
-        Equations (8)-(10) of the writeup form a *fourth*-order system
-        (second order in hat_n_e, first order in each neutral), which is
-        exactly Saarelma et al. 2023 Sec. 2.3's "fourth order system
-        requiring four boundary-conditions".  ``solve_bvp`` wants an
-        explicit first-order system, so the state carries the three
-        **fluxes** rather than the derivatives:
-
-            Y = [ hat_n_e,  Phi,  U,  W ]
-
-            Phi = hat_f * hat_n_e'          electron flux
-            U   = f_FC * hat_g * hat_n_FC   FC neutral flux / hat_V_FC
-            W   = hat_V_CX * f_CX * hat_g * hat_n_CX   CX neutral flux
-
-        with the conductance ``hat_f(hat_x, hat_n_e) = hat_g (hat_D_NEO
-        + hat_D_KBM) + hat_g hat_C_ETG / hat_n_e``.  The system is then
-
-            hat_n_e' = Phi / hat_f
-            Phi'     = -hat_n_e hat_S_i (hat_n_FC + hat_n_CX)
-            U'       =  hat_n_e (hat_S_i + hat_S_CX) hat_n_FC / hat_V_FC
-            W'       =  hat_n_e (hat_S_i hat_n_CX - hat_S_CX hat_n_FC / 2)
-
-        recovering hat_n_FC = U / (f_FC hat_g) and hat_n_CX = W /
-        (hat_V_CX f_CX hat_g).  Writing it this way means **no
-        coefficient derivatives appear anywhere** -- unlike
-        ``solve_sc_scipy``, which expands d/dx[f n_e'] and therefore
-        needs df/dx off the coarse p-file grid (the accuracy-limiting
-        step noted in ``solver_sc``'s module docstring).  Here the
-        divergence form is kept intact, as in the Firedrake weak form.
-
-        Boundary conditions
-        ===================
-        Four residuals, placed exactly as in the Firedrake path (see
-        ``ne_grad_bc_loc`` in the module docstring).  ``solve_bvp`` only
-        needs the right *number* of residuals and does not care which end
-        they are evaluated at, so ``ne_grad_bc_loc="outer"`` -- both
-        hat_n_e conditions at the separatrix -- needs no shooting here.
-
-        KBM treatment
-        =============
-        Only the Picard-frozen gate is supported: hat_D_KBM is refrozen
-        from the latest hat_n_e between outer iterations, which is the
-        Saarelma Eqs. 24-25 treatment and matches
-        ``solve_sc_scipy``.  ``picard_gate_mode="average"`` puts the
-        whole frozen diffusivity in the D-slot with hat_B_KBM = 0, so
-        hat_f depends on hat_x and hat_n_e only.  The Firedrake path's
-        ``kbm_treatment="inline"`` (smoothed local gate) has hat_f
-        depending on hat_n_e' as well, which would make Phi -> hat_n_e'
-        a per-point root-find; that is not implemented here.
-
-        Initial guess
-        =============
-        n_e comes from ``bc_ig_helpers.build_ne_initial_guess``
-        (``initial_guess``, ``tanh_width``, ``tanh_center``) and the two
-        neutral profiles from
-        ``bc_ig_helpers.build_neutral_initial_guess`` (``nFC_ic``,
-        ``nCX_ic``) -- the same shared helpers, with the same options,
-        that the Firedrake path uses, so the two discretisations start
-        from identical SI profiles.  ``nFC_ic="solve"`` /
-        ``nCX_ic="solve"`` integrate the neutral equations analytically
-        at the frozen n_e guess; ``nFC_ic``/``nCX_ic``
-        ``="manual EPEDNN loop"`` read the tabulated EPED-NN profiles,
-        and ``nCX_ic="scale nFC"`` scales the FC guess by
-        nCX_x0 / nFC_x0.  The SI neutral densities are converted to the
-        flux variables U and W before being handed to ``solve_bvp``.
-
-        Returns
-        -------
-        dict
-            The same result schema as :meth:`solve_coupled_nondim`, in SI
-            units -- see
-            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
+        """scipy ``solve_bvp`` collocation solver for the coupled model, with
+        state Y = [hat_n_e, Phi, U, W] and a Picard loop on D_KBM. Details are
+        in docs/solver_3d_documentation.tex; returns the common result dict in
+        SI.
         """
         v = self.verbose if verbose is None else bool(verbose)
         force_setup = not reuse_setup
@@ -1029,6 +666,9 @@ class NondimSolverMixin:
             )
 
         # Equilibrium / kinetic / ETG setup -- pure numpy, no Firedrake.
+        # apply_free_params() first: construct_C_ETG() consumes De_chie_etg,
+        # and the Picard gate below consumes alpha_crit / C_KBM.
+        self.apply_free_params(free_params)
         self._ensure_firedrake_coefficient_grids(x_res, force=force_setup)
         self.construct_C_ETG()
 
@@ -1083,13 +723,8 @@ class NondimSolverMixin:
             g_q = c['g'](hat_x_q)
             return g_q * (c['D_NEO'](hat_x_q) + D_KBM_q) + g_q * c['C_ETG'](hat_x_q) / N_q
 
-        # Neutral seeds from the shared helper in src/bc_ig_helpers.py --
-        # the *same* routine, on the same SI grid, that the firedrake path
-        # uses, so the two discretisations start from identical profiles
-        # and support the identical nFC_ic / nCX_ic options.  The SI
-        # densities are then converted into the flux variables this
-        # collocation system actually carries,
-        #     U = f_FC hat_g hat_n_FC,   W = hat_V_CX f_CX hat_g hat_n_CX.
+        # Neutral seeds from the shared helper, converted to the flux
+        # variables U = f_FC hat_g hat_n_FC, W = hat_V_CX f_CX hat_g hat_n_CX.
         nFC_init, nCX_init = bcig.build_neutral_initial_guess(
             self, x_si, ne_init, nFC_ic=nFC_ic, nCX_ic=nCX_ic,
         )
@@ -1263,6 +898,7 @@ class NondimSolverMixin:
 
     def solve_coupled_nondim(self,
                       x_res=20,
+                      free_params=None,
                       fe_degree=2,
                       solver_structure="firedrake",
                       ne_inner_bc="neumann",
@@ -1296,190 +932,10 @@ class NondimSolverMixin:
                       bvp_max_nodes=50000,
                       ne_floor=1e-8,
                       verbose=None):
-        """Non-dimensional Firedrake solver for the coupled three-equation
-        Saarelma--Connor neutral-transport pedestal model.
-
-        Equivalent to :meth:`saarelma_connor.solve_coupled` but assembles
-        and solves the dimensionless residuals derived in App.~A.8
-        (foundational scaling, no free $\\Lambda$ prefactor).  Inputs and
-        outputs are in SI units; the rescaling is invisible to the
-        caller.
-
-        Boundary conditions
-        ===================
-        ``ne_grad_bc_loc="inner"`` (default) -- one condition per end:
-
-            hat_n_e (hat_x = 0)        = 1
-            hat_n_FC(hat_x = 0)        = nFC_x0 / n0
-            hat_n_CX(hat_x = 0)        = nCX_x0 / n0
-            hat_n_e (hat_x = -1)       = ne_inner / n0   (Dirichlet option)
-         OR hat_n_e'(hat_x = -1)       = L * dne_dx_inner / n0   (Neumann option)
-
-        ``ne_grad_bc_loc="outer"`` -- both n_e conditions at the
-        separatrix (Saarelma et al. 2023 Sec. 2.3), inner boundary free:
-
-            hat_n_e (hat_x = 0)        = 1
-            hat_n_e'(hat_x = 0)        = L * dne_dx_outer / n0
-            hat_n_FC(hat_x = 0)        = nFC_x0 / n0
-            hat_n_CX(hat_x = 0)        = nCX_x0 / n0
-            (nothing imposed at hat_x = -1)
-
-        Parameters
-        ----------
-        See :meth:`saarelma_connor.solve_coupled`.  All physical inputs
-        are in SI units.
-
-        solver_structure : {"firedrake", "scipy"}, default "firedrake"
-            Which discretisation solves the coupled system.  ``"scipy"``
-            forwards to :meth:`solve_coupled_nondim_scipy` (collocation
-            via ``solve_bvp``); it supports ``picard_gate_mode="average"``
-            only.  Firedrake-only arguments (``fe_degree``,
-            ``linear_solver``, ``ksp_*``, ``kbm_treatment="inline"``,
-            ``neutrals_treatment``, ``grad_bc_*``) do not apply there.
-        bvp_tol, bvp_max_nodes : float, int
-            ``solve_bvp`` controls, used only by ``solver_structure="scipy"``.
-        ne_floor : float
-            Lower clip on hat_n_e keeping hat_C_ETG / hat_n_e finite in
-            the scipy driver.
-        ne_grad_bc_loc : {"inner", "outer"}, default "inner"
-            Which end of the domain carries the prescribed dn_e/dx; see
-            the module docstring.  ``"outer"`` frees the inner boundary
-            entirely and forces ``ne_inner_bc="neumann"`` internally
-            (the ds(1) flux becomes the unknown that the separatrix
-            gradient determines), so a requested inner Dirichlet
-            condition is ignored with a ``RuntimeWarning``.
-        dne_dx_outer : float or None
-            SI separatrix slope dn_e/dx|_{x=0} (m^-4) used when
-            ``ne_grad_bc_loc="outer"``.  Taken from the same origins as
-            the inner slope: given explicitly it wins for any
-            ``bc_origin`` (this is how Saarelma Eq. (20) is fed in);
-            left None it is read off the p-file gradient at x = 0, which
-            requires a p-file-backed ``bc_origin``.
-        grad_bc_tol : float, default 1e-8
-            Relative tolerance on hat_n_e'(0) - target for the
-            ``"outer"`` secant iteration.
-        grad_bc_max_it : int, default 25
-            Maximum secant iterations for the ``"outer"`` mode.
-
-        tanh_width is in x units
-
-        scale_ne_inner is a scaling factor for the inner boundary density for testing purposes
-
-        Sets
-        ----
-        SI-unit attributes (parent-class compatibility):
-            self.x_sol, self.ne_sol, self.nFC_sol, self.nCX_sol
-            self.u_fd  (mixed Firedrake Function -- now stores hat values)
-            self.W_fd, self.V_fd
-
-        Non-dim attributes (diagnostics):
-            self.hat_x_sol, self.hat_ne_sol, self.hat_nFC_sol, self.hat_nCX_sol
-            self._L_nd, self._n0_nd, self._T0_nd, self._S0_nd
-            self._tau_nd, self._V0_nd, self._D0_nd
-
-        KBM treatment
-        =============
-        ``kbm_treatment`` controls how the piecewise KBM gate
-        (Heaviside on alpha - alpha_crit) is handled.
-
-        ``"inline"`` (default, new)
-            ``hat_A_KBM`` and ``hat_B_KBM`` are written directly as UFL
-            expressions of the trial hat_n_e (App. A.7--A.8 of the
-            writeup), with the discontinuous indicator replaced by the
-            smoothed Heaviside
-
-                gate(z) = 0.5 * (1 + tanh(z / kbm_gate_eps))
-
-            so the residual is C^infty in hat_n_e and SNES Newton can
-            differentiate it analytically.  The Connor-Hastie alpha is
-            evaluated locally as
-
-                alpha(hat_x, hat_n_e) = hat_alpha_nodp(hat_x)
-                                        * d/dhat_x [ hat_n_e * hat_T ].
-
-            The gate therefore updates self-consistently within every
-            Newton step; on convergence the model is on its own KBM
-            branch by construction.
-
-        ``"picard"``
-            Outer Picard (fixed-point) loop following Saarelma et al.
-            (2023): each Picard iteration the KBM gate and coefficients
-            are evaluated from the *current* hat_n_e (the initial guess
-            on the first pass, thereafter the previously solved
-            profile), then frozen while SNES solves the three-field
-            system.  The loop repeats until the density profile is
-            unchanged to ``picard_rtol`` and the gate state is stable
-            (or ``picard_max_it`` is hit).  ``picard_gate_mode`` selects
-            both the whole-grid gate criterion and the frozen flux
-            structure:
-
-            ``picard_gate_mode="average"`` (default)
-                KBM on iff pedestal-averaged alpha exceeds alpha_crit
-                (Eq. 24).  When on, freeze
-                ``hat_D_KBM = (alpha_bar - alpha_crit) * hat_G`` into
-                the A-slot with B = 0 (Eq. 25 diffusivity).
-            ``picard_gate_mode="majority"``
-                KBM on iff more than half of the pedestal grid points
-                have local alpha > alpha_crit.  When on, freeze the
-                local A/B KBM structure everywhere (no pointwise gate).
-
-        ``kbm_gate_eps`` : float or None, default None
-            Smoothing width of the Heaviside (inline treatment only).
-            ``None`` -> 5% of ``alpha_crit`` (with a 1e-3 floor).
-            Smaller eps makes the gate sharper but harder for Newton
-            to converge.
-
-        ``picard_max_it`` : int, default 50
-            Maximum number of Picard iterations ("picard" only).
-
-        ``picard_rtol`` : float, default 1e-8
-            Relative L2 tolerance on the change in hat_n_e between
-            Picard iterations ("picard" only).
-
-        ``picard_relax`` : float in (0, 1], default 1.0
-            Under-relaxation factor for the frozen KBM coefficient
-            update: coeff_new = relax * coeff_computed + (1 - relax) *
-            coeff_old.  Use < 1 if the gate flip-flops between iterations.
-            1.0 means this effect is disabled.
-
-        After a "picard" solve, ``self.picard_info`` records the
-        iteration history (alpha_bar, gate state, profile change) and
-        whether the loop converged.
-
-        Neutrals treatment
-        ==================
-        ``neutrals_treatment`` controls how the FC / CX neutral
-        equations are solved.
-
-        ``"fem"`` (default)
-            n_FC and n_CX are solved as part of the mixed three-field
-            Firedrake system (legacy behaviour).  Requires the FE mesh
-            to resolve the neutral penetration depth
-            lambda = |V_FC| / (n_e (S_i + S_CX)); on neutral-opaque
-            devices (e.g. SPARC, lambda ~ 0.2 mm) an unresolved layer
-            produces oscillatory / negative neutral densities and
-            Newton line-search failures.
-
-        ``"analytic"`` (requires ``kbm_treatment="picard"``)
-            Each Picard iteration, n_FC and n_CX are solved *exactly*
-            (integrating factor / per-step exponential integrator) on a
-            dense ``n_neutral_sub``-point sub-grid for the current n_e
-            (see :meth:`_solve_neutrals_analytic_nondim`), then frozen
-            in the n_e equation.  The mixed-system residuals for n_FC /
-            n_CX are replaced by trivial pinning forms so the rest of
-            the machinery (mixed space, BCs, output extraction) is
-            unchanged.  Positivity of the neutrals is guaranteed and
-            ``x_res`` only needs to resolve the *electron* profile.
-
-        ``n_neutral_sub`` : int, default 4001
-            Number of sub-grid points for the analytic neutral solve.
-            Choose so that L / n_neutral_sub << min(lambda).
-
-        Returns
-        -------
-        dict
-            The common solver result schema, in SI units -- see
-            :meth:`src.solver.SaarelmaConnorBase._build_result_dict`.
+        """Non-dimensional coupled three-equation solver (Firedrake, or scipy
+        via ``solver_structure``) with SI inputs and outputs. Parameters, BCs
+        and the KBM / neutral treatments are documented in
+        docs/solver_3d_documentation.tex; returns the common result dict.
         """
         if not _FIREDRAKE_AVAILABLE:
             raise ImportError(
@@ -1488,12 +944,15 @@ class NondimSolverMixin:
                 f"error:\n  {_FIREDRAKE_IMPORT_ERR}"
             )
 
+        self._fd_cache = {}
+
         solver_structure = self._check_solver_structure(solver_structure)
         if solver_structure == "scipy":
             # Collocation instead of finite elements; see
             # solve_coupled_nondim_scipy for the flux-variable formulation.
             return self.solve_coupled_nondim_scipy(
                 x_res=x_res,
+                free_params=free_params,
                 ne_inner_bc=ne_inner_bc,
                 ne_grad_bc_loc=ne_grad_bc_loc,
                 bc_origin=bc_origin,
@@ -1522,6 +981,9 @@ class NondimSolverMixin:
 
         # Equilibrium-only quantities (FSA |grad r|^2, S_i_pres, etc.) and
         # ETG coefficient -- exactly the same setup as the parent class.
+        # apply_free_params() first: construct_C_ETG() consumes De_chie_etg,
+        # and the KBM gate consumes alpha_crit / C_KBM.
+        self.apply_free_params(free_params)
         self._ensure_firedrake_coefficient_grids(x_res, force=force_setup)
         self.construct_C_ETG()
 
@@ -1584,9 +1046,7 @@ class NondimSolverMixin:
         )
 
         # ------------------------------------------------------------------
-        # KBM coefficients evaluated at the initial guess.  For
-        # "picard" they seed the first Picard iteration; for "inline"
-        # they are only used for diagnostics (alpha_bar of the guess).
+        # KBM coefficients at the initial guess (Picard seed / diagnostics).
         # ------------------------------------------------------------------
         kbm_treatment = str(kbm_treatment).lower()
         if kbm_treatment not in ("inline", "picard"):
@@ -1650,11 +1110,7 @@ class NondimSolverMixin:
         hat_ne_x0        = nebcs.ne_outer / self._n0_nd   # = 1 by construction
         hat_nFC_x0       = self.nFC_x0  / self._n0_nd
         hat_nCX_x0       = self.nCX_x0  / self._n0_nd
-        # The single Neumann value.  In "inner" mode it is imposed on ds(1);
-        # in "outer" mode ds(1) carries the *unknown* inner flux and this is
-        # the separatrix-gradient target the secant drives hat_n_e'(0) to, so
-        # it also seeds that search -- the pedestal-top gradient is never
-        # looked up in that pathway.
+        # Neumann value: ds(1) flux ("inner") or hat_n_e'(0) target ("outer").
         hat_dne_dx_bc    = self._L_nd * nebcs.dne_dx / self._n0_nd
 
         if v:
@@ -1703,19 +1159,8 @@ class NondimSolverMixin:
         self._fd_cache["hat_dT_dx_fd"] = f
 
         # ------------------------------------------------------------------
-        # KBM equilibrium fields used by the *inline* (trial-dependent)
-        # KBM treatment.  These are independent of the trial hat_n_e but
-        # depend on the dimensionless scales, so they are built here
-        # (after _set_nondim_scales) rather than inside
-        # _ensure_firedrake_discretization_nondim.
-        #
-        #   hat_G_KBM(hat_x)
-        #       = G_KBM_si(x) / [D]_0
-        #       = ( C_KBM * c_s(x) * rho_s(x)^2 / a ) / (L^2 n_0 S_0).
-        #
-        #   hat_alpha_nodp(hat_x)
-        #       = alpha_nodp_si(x) * n_0 * T_0 / L
-        #         (dimensionless: alpha = hat_alpha_nodp * d(hat_n_e hat_T)/dhat_x).
+        # KBM equilibrium fields for the inline treatment:
+        #   hat_G_KBM = G_KBM / [D]_0,  hat_alpha_nodp = alpha_nodp n0 T0 / L.
         # ------------------------------------------------------------------
         G_KBM_grid = self.C_KBM * (self.c_s * self.rho_s ** 2) / self.a  # m^2/s
         hat_G_KBM_arr = (
@@ -1746,15 +1191,8 @@ class NondimSolverMixin:
         hat_ne_x0_c    = Constant(hat_ne_x0)
         hat_nFC_x0_c   = Constant(hat_nFC_x0)
         hat_nCX_x0_c   = Constant(hat_nCX_x0)
-        # ds(1) slope: the prescribed Neumann value in "inner" mode, the
-        # free unknown the secant drives in "outer" mode.
-        # Seed for the "outer"-mode secant.  Zero inner flux is the
-        # natural boundary condition a Galerkin form defaults to, so it is
-        # the neutral starting point and -- unlike seeding from a
-        # pedestal-top gradient -- uses no information the "outer"
-        # pathway forbids.  It is also markedly more robust: r(s) is
-        # discontinuous where the profile switches solution branch, and
-        # approaching from zero avoids straddling that jump.
+        # ds(1) slope: the Neumann value in "inner" mode, the secant unknown
+        # in "outer" mode (seeded with zero flux, the Galerkin natural BC).
         hat_slope_seed = (hat_dne_dx_bc if ne_grad_bc_loc == "inner"
                           else (0.0 if grad_bc_seed is None
                                 else self._L_nd * float(grad_bc_seed)
@@ -1770,9 +1208,7 @@ class NondimSolverMixin:
         # ------------------------------------------------------------------
         # KBM treatment dispatch
         # ------------------------------------------------------------------
-        # Smoothing width for the Heaviside in the inline gate.  Default
-        # is 5% of alpha_crit (>= 1e-3 to avoid division by zero at
-        # alpha_crit == 0).
+        # Inline-gate smoothing width: default 5% of alpha_crit, floor 1e-3.
         if kbm_gate_eps is None:
             kbm_gate_eps_val = max(1e-3, 0.05 * float(self.alpha_crit))
         else:
@@ -1807,13 +1243,8 @@ class NondimSolverMixin:
         hat_ne_curr, hat_nFC_curr, hat_nCX_curr = split(u)
 
         if kbm_treatment == "picard":
-            # Per-iteration-frozen KBM coefficients, updated between
-            # Picard iterations from the latest hat_n_e.
-            #
-            # average: freeze hat_D_KBM = (alpha_bar - alpha_crit)*hat_G
-            #          into the A-slot with B = 0 (Saarelma Eq. 25).
-            # majority: freeze the local A/B structure everywhere when
-            #          the majority vote says the gate is on.
+            # Frozen KBM coefficients: "average" puts hat_D_KBM in the A-slot
+            # with B = 0; "majority" freezes the local A/B structure.
             if picard_gate_mode == "average":
                 hat_A_KBM_picard_fd = Function(V, name="hat_D_KBM_picard")
                 hat_A_KBM_picard_fd.dat.data[:] = self._hat_D_KBM
@@ -1875,11 +1306,7 @@ class NondimSolverMixin:
             hat_B_KBM_bc_term=hat_B_KBM_bc_term,
         )
         if neutrals_treatment == "analytic":
-            # Neutrals are solved exactly (integrating factor) for the
-            # current n_e and frozen into Functions.  The mixed-system
-            # residuals for n_FC / n_CX reduce to pinning forms so the
-            # Newton solve only really works on n_e; the frozen
-            # Functions are refreshed each Picard iteration below.
+            # Analytic neutrals frozen into Functions; F2/F3 just pin them.
             hat_nFC_a, hat_nCX_a = self._solve_neutrals_analytic_nondim(
                 u.subfunctions[0].dat.data, n_sub=n_neutral_sub,
             )
@@ -1919,11 +1346,7 @@ class NondimSolverMixin:
             ksp_max_it=ksp_max_it,
         )
 
-        # One nonlinear solve.  In "inner" mode that is the bare SNES
-        # solve; in "outer" mode it is the secant iteration that pins
-        # hat_n_e'(0) by treating the (unconstrained) inner flux as the
-        # unknown.  Inside the Picard loop the slope carries over between
-        # iterations, so later shootings start already close.
+        # One nonlinear solve: bare SNES ("inner") or secant shoot ("outer").
         self.grad_bc_info = None
 
         def _solve_once():
@@ -1938,11 +1361,7 @@ class NondimSolverMixin:
 
         if kbm_treatment == "picard":
             # ----------------------------------------------------------
-            # Outer Picard loop (Saarelma et al. 2023): freeze the KBM
-            # gate/coefficients from the current density profile, solve
-            # the three-field system with SNES, recompute the gate from
-            # the new profile, and repeat until the profile and gate
-            # stop changing.
+            # Outer Picard loop (Saarelma et al. 2023) on the KBM gate.
             # ----------------------------------------------------------
             picard_history = []
             prev_hat_ne = u.subfunctions[0].dat.data.copy()
@@ -2087,12 +1506,10 @@ class NondimSolverMixin:
 
 
 def __getattr__(name):
-    """Resolve the pre-refactor class name to the assembled class.
-
-    Deferred rather than a top-level import: ``solver_api`` imports this
-    module, so binding the name at import time would be a cycle.
+    """Lazily resolve the legacy name ``saarelma_connor_nondim`` to the
+    assembled class (a top-level import would be a cycle).
     """
     if name == 'saarelma_connor_nondim':
-        from src.solver_api import saarelma_connor
+        from src.saarelma_connor_api import saarelma_connor
         return saarelma_connor
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
