@@ -178,7 +178,7 @@ def _pfile_gradient_at(model, x_at):
     return float(np.interp(x_at, model.x_init, dne_dx_pres))
 
 
-def _pfile_ne_inner(model, x_inner, scale_ne_inner=None):
+def _pfile_ne_inner(model, x_inner):
     """n_e(x_inner) (m^-3) from the p-file, with the parent class's
     manual-ne_x0 offset and optional scaling applied."""
     ne_inner_val = float(np.interp(x_inner, model.x_init, model.n_e_pres))
@@ -187,8 +187,6 @@ def _pfile_ne_inner(model, x_inner, scale_ne_inner=None):
         # density (same convention as the original inline block).
         ne_inner_val += (model.ne_x0
                          - float(np.interp(0.0, model.x_init, model.n_e_pres)))
-    if scale_ne_inner is not None:
-        ne_inner_val *= float(scale_ne_inner)
     return ne_inner_val
 
 
@@ -210,7 +208,7 @@ def ne_inner_from_neumann(ne_outer, dne_dx, x_inner):
 
 
 def resolve_ne_bcs(model, ne_bc_loc, bc_origin="p-file",
-                   dne_dx=None, ne_inner=None, scale_ne_inner=None,
+                   dne_dx=None, ne_inner=None,
                    require_negative_slope=False):
     """Resolve the n_e boundary conditions for one solve.
 
@@ -237,8 +235,6 @@ def resolve_ne_bcs(model, ne_bc_loc, bc_origin="p-file",
         Neumann value (m^-4) at the pathway's Neumann location.
     ne_inner : float or None
         Pedestal-top density (m^-3) for the initial guess only.
-    scale_ne_inner : float or None
-        Optional scaling of the p-file-derived ``ne_inner`` (testing aid).
     require_negative_slope : bool
         Raise if the resolved slope is not strictly negative.  The
         original-model solvers set this; the coupled solvers do not.
@@ -294,7 +290,7 @@ def resolve_ne_bcs(model, ne_bc_loc, bc_origin="p-file",
         ne_inner_guess = float(ne_inner)
         ne_inner_origin = "user"
     elif origin_l in _PFILE_ORIGINS:
-        ne_inner_guess = _pfile_ne_inner(model, x_inner, scale_ne_inner)
+        ne_inner_guess = _pfile_ne_inner(model, x_inner)
         ne_inner_origin = str(bc_origin)
     else:
         ne_inner_guess = ne_inner_from_neumann(ne_outer, dne_dx_val, x_inner)

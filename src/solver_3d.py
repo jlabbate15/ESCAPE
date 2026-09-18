@@ -636,7 +636,6 @@ class ThreeDSolverMixin:
                                    bvp_tol=1e-6,
                                    bvp_max_nodes=50000,
                                    reuse_setup=True,
-                                   scale_ne_inner=None,
                                    ne_floor=1e-8,
                                    verbose=None):
         """scipy ``solve_bvp`` collocation solver for the coupled model, with
@@ -678,7 +677,7 @@ class ThreeDSolverMixin:
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc, bc_origin=bc_origin,
             dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
-            ne_inner=ne_inner, scale_ne_inner=scale_ne_inner,
+            ne_inner=ne_inner,
         )
         self.ne_bcs = nebcs
 
@@ -917,7 +916,6 @@ class ThreeDSolverMixin:
                       ksp_rtol=1e-8,
                       ksp_max_it=200,
                       reuse_setup=True,
-                      scale_ne_inner=None,
                       nCX_ic="solve",
                       nFC_ic="solve",
                       kbm_treatment="inline",
@@ -971,7 +969,6 @@ class ThreeDSolverMixin:
                 bvp_tol=bvp_tol,
                 bvp_max_nodes=bvp_max_nodes,
                 reuse_setup=reuse_setup,
-                scale_ne_inner=scale_ne_inner,
                 ne_floor=ne_floor,
                 verbose=verbose,
             )
@@ -1005,7 +1002,7 @@ class ThreeDSolverMixin:
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc, bc_origin=bc_origin,
             dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
-            ne_inner=ne_inner, scale_ne_inner=scale_ne_inner,
+            ne_inner=ne_inner, 
         )
         self.ne_bcs = nebcs
 
@@ -1503,13 +1500,3 @@ class ThreeDSolverMixin:
             )
 
         return self._build_result_dict('3D', 'firedrake')
-
-
-def __getattr__(name):
-    """Lazily resolve the legacy name ``saarelma_connor_nondim`` to the
-    assembled class (a top-level import would be a cycle).
-    """
-    if name == 'saarelma_connor_nondim':
-        from src.saarelma_connor_api import saarelma_connor
-        return saarelma_connor
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

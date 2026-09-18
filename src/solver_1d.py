@@ -1132,13 +1132,3 @@ class OneDSolverMixin:
             f"solver_structure must be 'firedrake' or 'scipy', got "
             f"{solver_structure!r}."
         )
-
-
-def __getattr__(name):
-    """Lazily resolve the legacy name ``saarelma_connor_sc`` to the assembled
-    class (a top-level import would be a cycle).
-    """
-    if name == 'saarelma_connor_sc':
-        from src.saarelma_connor_api import saarelma_connor
-        return saarelma_connor
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
