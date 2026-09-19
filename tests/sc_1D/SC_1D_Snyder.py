@@ -9,7 +9,7 @@ import netCDF4 as nc # OMFIT profile files are netCDF
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.profiles_loop_solve import profiles_loop_solve
-from src.load_equil import initialize_inputs
+from ESCAPE.helpers.load_equil import initialize_inputs
 from src.solver_sc import saarelma_connor_sc
 
 tokamaker_python_path = os.getenv('OFT_ROOTPATH')

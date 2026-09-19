@@ -45,6 +45,14 @@ There are exactly **two** n_e boundary-condition pathways, selected by
 The Dirichlet value is ``model.ne_x0`` in both pathways; only the
 *location of the Neumann condition* differs.
 
+Where the values come from
+==========================
+Always from the kinetic profile the model holds, ``model.n_e`` (on
+``model.psi_ne_eval``), interpolated onto the solver's ``x_init`` grid at
+the moment the boundary conditions are resolved.  There is no
+``bc_origin`` switch and no way to pass boundary values in explicitly:
+to change the boundary conditions, change ``model.n_e``.
+
 Only what was asked for is looked up
 ====================================
 :func:`resolve_ne_bcs` reads the gradient at the Neumann location the
@@ -70,6 +78,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
+from scipy.interpolate import interp1d
 
 __all__ = [
     "NE_BC_LOCS",
@@ -83,9 +92,8 @@ __all__ = [
 #: The only two supported n_e boundary-condition pathways.
 NE_BC_LOCS = ("inner", "outer")
 
-#: ``bc_origin`` values that carry a p-file (or p-file-equivalent) profile
-#: the gradient can be read off.  Anything else must supply values explicitly.
-_PFILE_ORIGINS = ("p-file", "p-file user combo", "manual epednn loop")
+#: Label recorded in ``NeBCs.origin`` / ``NeBCs.ne_inner_origin``.
+_PROFILE_ORIGIN = "model.n_e profile"
 
 
 @dataclass
@@ -172,45 +180,39 @@ def check_ne_bc_loc(ne_bc_loc):
     return loc
 
 
-def _pfile_gradient_at(model, x_at):
-    """dn_e/dx (m^-4) read off the p-file density profile at SI ``x_at``."""
-    dne_dx_pres = np.gradient(model.n_e_pres, model.x_init)
-    return float(np.interp(x_at, model.x_init, dne_dx_pres))
+def _ne_on_x_init(model):
+    """``model.n_e`` (m^-3, on ``model.psi_ne_eval``) interpolated onto the
+    solver grid ``model.x_init`` (via ``model.psi_N_pres``).
+
+    Re-interpolated on every call rather than reusing ``model.n_e_pres``,
+    so the boundary conditions always follow the current ``model.n_e``.
+    """
+    return interp1d(model.psi_ne_eval, model.n_e, kind="linear",
+                    bounds_error=False,
+                    fill_value="extrapolate")(model.psi_N_pres)
 
 
-def _pfile_ne_inner(model, x_inner):
-    """n_e(x_inner) (m^-3) from the p-file, with the parent class's
-    manual-ne_x0 offset and optional scaling applied."""
-    ne_inner_val = float(np.interp(x_inner, model.x_init, model.n_e_pres))
+def _profile_gradient_at(model, x_at):
+    """dn_e/dx (m^-4) read off ``model.n_e`` at SI ``x_at``."""
+    dne_dx = np.gradient(_ne_on_x_init(model), model.x_init)
+    return float(np.interp(x_at, model.x_init, dne_dx))
+
+
+def _profile_ne_inner(model, x_inner):
+    """n_e(x_inner) (m^-3) from ``model.n_e``, with the parent class's
+    manual-ne_x0 offset applied."""
+    ne_prof = _ne_on_x_init(model)
+    ne_inner_val = float(np.interp(x_inner, model.x_init, ne_prof))
     if getattr(model, "ne_x0_manual", False):
         # Shift the whole profile so it meets the manually set separatrix
         # density (same convention as the original inline block).
         ne_inner_val += (model.ne_x0
-                         - float(np.interp(0.0, model.x_init, model.n_e_pres)))
+                         - float(np.interp(0.0, model.x_init, ne_prof)))
     return ne_inner_val
 
 
-def ne_inner_from_neumann(ne_outer, dne_dx, x_inner):
-    """Pedestal-top density by linear extrapolation from the separatrix.
-
-    The fallback used when ``n_e(x_inner)`` is neither user-supplied nor
-    available from a p-file: run the prescribed Neumann slope back from
-    the outer Dirichlet value over the width of the domain,
-
-        n_e(x_inner) = n_e(0) + dn_e/dx * (x_inner - 0).
-
-    Whichever of the two Neumann conditions the pathway selected is the
-    one used, so this needs no knowledge the caller did not supply.  With
-    ``x_inner < 0`` and ``dn_e/dx < 0`` it returns a value above the
-    separatrix density, as it should.
-    """
-    return float(ne_outer) + float(dne_dx) * float(x_inner)
-
-
-def resolve_ne_bcs(model, ne_bc_loc, bc_origin="p-file",
-                   dne_dx=None, ne_inner=None,
-                   require_negative_slope=False):
-    """Resolve the n_e boundary conditions for one solve.
+def resolve_ne_bcs(model, ne_bc_loc, require_negative_slope=False):
+    """Resolve the n_e boundary conditions for one solve from ``model.n_e``.
 
     Only the two conditions belonging to ``ne_bc_loc`` are looked up; the
     gradient at the other end of the domain is never evaluated.
@@ -218,23 +220,12 @@ def resolve_ne_bcs(model, ne_bc_loc, bc_origin="p-file",
     Parameters
     ----------
     model : saarelma_connor
-        Solver instance.  ``model.ne_x0``, ``model.x_inner``,
-        ``model.x_init`` and ``model.n_e_pres`` must already be set (i.e.
-        call this after the equilibrium/profile setup and after
-        ``find_inner_boundary``).
+        Solver instance.  ``model.n_e``, ``model.psi_ne_eval``,
+        ``model.psi_N_pres``, ``model.x_init``, ``model.ne_x0`` and
+        ``model.x_inner`` must already be set (i.e. call this after the
+        equilibrium/profile setup and after ``find_inner_boundary``).
     ne_bc_loc : {"inner", "outer"}
         Boundary-condition pathway; see the module docstring.
-    bc_origin : str
-        Where values come from when not passed explicitly.  A p-file
-        backed origin (``"p-file"``, ``"p-file user combo"``,
-        ``"manual EPEDNN loop"``) reads the profile; ``"user"`` requires
-        ``dne_dx``.  An explicit ``dne_dx`` always wins, whatever the
-        origin -- that is how a modelled separatrix gradient (Saarelma
-        Eq. (20)) is fed in.
-    dne_dx : float or None
-        Neumann value (m^-4) at the pathway's Neumann location.
-    ne_inner : float or None
-        Pedestal-top density (m^-3) for the initial guess only.
     require_negative_slope : bool
         Raise if the resolved slope is not strictly negative.  The
         original-model solvers set this; the coupled solvers do not.
@@ -244,7 +235,6 @@ def resolve_ne_bcs(model, ne_bc_loc, bc_origin="p-file",
     NeBCs
     """
     loc = check_ne_bc_loc(ne_bc_loc)
-    origin_l = str(bc_origin).lower()
 
     x_inner = float(model.x_inner)
     if x_inner >= 0.0:
@@ -256,24 +246,7 @@ def resolve_ne_bcs(model, ne_bc_loc, bc_origin="p-file",
 
     # ---- the Neumann value, read only where the pathway puts it -------
     x_neumann = x_inner if loc == "inner" else 0.0
-    if dne_dx is not None:
-        dne_dx_val = float(dne_dx)
-        origin = f"user ({bc_origin})"
-    elif origin_l in _PFILE_ORIGINS:
-        dne_dx_val = _pfile_gradient_at(model, x_neumann)
-        origin = str(bc_origin)
-    elif origin_l == "user":
-        raise ValueError(
-            f"bc_origin='user' with ne_bc_loc={loc!r} requires dne_dx "
-            f"(the Neumann value at "
-            f"{'x_inner' if loc == 'inner' else 'the separatrix'}) "
-            "to be given."
-        )
-    else:
-        raise ValueError(
-            f"bc_origin must be 'user' or one of {_PFILE_ORIGINS}, got "
-            f"{bc_origin!r}."
-        )
+    dne_dx_val = _profile_gradient_at(model, x_neumann)
 
     if require_negative_slope and not dne_dx_val < 0.0:
         where = "x_inner" if loc == "inner" else "0"
@@ -284,17 +257,7 @@ def resolve_ne_bcs(model, ne_bc_loc, bc_origin="p-file",
         )
 
     # ---- pedestal-top density for the initial guess only --------------
-    # user -> p-file -> linear extrapolation from the outer Dirichlet
-    # value along the prescribed Neumann slope.
-    if ne_inner is not None:
-        ne_inner_guess = float(ne_inner)
-        ne_inner_origin = "user"
-    elif origin_l in _PFILE_ORIGINS:
-        ne_inner_guess = _pfile_ne_inner(model, x_inner)
-        ne_inner_origin = str(bc_origin)
-    else:
-        ne_inner_guess = ne_inner_from_neumann(ne_outer, dne_dx_val, x_inner)
-        ne_inner_origin = "linear extrapolation from n_e(0) along dne/dx"
+    ne_inner_guess = _profile_ne_inner(model, x_inner)
 
     # Kept for backwards compatibility with callers/notebooks that read
     # these attributes off the model after a solve.
@@ -307,7 +270,7 @@ def resolve_ne_bcs(model, ne_bc_loc, bc_origin="p-file",
 
     return NeBCs(loc=loc, x_inner=x_inner, ne_outer=ne_outer,
                  dne_dx=dne_dx_val, ne_inner_guess=ne_inner_guess,
-                 origin=origin, ne_inner_origin=ne_inner_origin)
+                 origin=_PROFILE_ORIGIN, ne_inner_origin=_PROFILE_ORIGIN)
 
 
 def build_ne_initial_guess(model, x_grid, initial_guess, bcs,
@@ -517,7 +480,7 @@ def build_neutral_initial_guess(model, x_grid, ne_init,
     return nFC_init, nCX_init
 
 
-def resolve_integration_constant(model, bc_origin="p-file", dne_dx_neginf=None):
+def resolve_integration_constant(model):
     """Saarelma's constant of integration C = dn_e/dx|_{x=-inf} (m^-4).
 
     **Not a boundary condition.**  In the original model this is the
@@ -530,18 +493,9 @@ def resolve_integration_constant(model, bc_origin="p-file", dne_dx_neginf=None):
 
     Because it is a model constant rather than a boundary condition it is
     resolved independently of ``ne_bc_loc`` -- an ``"outer"`` solve still
-    needs it, and it still comes from the pedestal top.  Pass
-    ``dne_dx_neginf`` to override.
+    needs it, and it still comes from the pedestal top of ``model.n_e``.
     """
-    if dne_dx_neginf is not None:
-        val = float(dne_dx_neginf)
-    elif str(bc_origin).lower() in _PFILE_ORIGINS:
-        val = _pfile_gradient_at(model, float(model.x_inner))
-    else:
-        raise ValueError(
-            f"bc_origin={bc_origin!r} requires dne_dx_neginf (Saarelma's "
-            "constant of integration C) to be given explicitly."
-        )
+    val = _profile_gradient_at(model, float(model.x_inner))
     model.dne_dx_neginf = val
     return val
 

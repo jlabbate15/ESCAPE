@@ -26,7 +26,7 @@ tokamaker_python_path = os.getenv('OFT_ROOTPATH')
 if tokamaker_python_path is not None:
     sys.path.append(os.path.join(tokamaker_python_path, 'python'))
 
-from src.load_equil import initialize_inputs
+from ESCAPE.helpers.load_equil import initialize_inputs
 from src.solver_nondim import saarelma_connor_nondim
 
 # ── Scan grid ────────────────────────────────────────────────────────────────

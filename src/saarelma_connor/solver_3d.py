@@ -23,7 +23,7 @@ except Exception as _firedrake_import_err:
     _FIREDRAKE_AVAILABLE = False
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
-from src import bc_ig_helpers as bcig
+from src.saarelma_connor import bc_ig_helpers as bcig
 
 
 # Conversion constant (eV -> J)
@@ -620,7 +620,6 @@ class ThreeDSolverMixin:
                                    free_params=None,
                                    ne_inner_bc="neumann",
                                    ne_grad_bc_loc="inner",
-                                   bc_origin=None,
                                    ne_inner=None,
                                    dne_dx_inner=None,
                                    dne_dx_outer=None,
@@ -675,7 +674,7 @@ class ThreeDSolverMixin:
 
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
-            self, ne_grad_bc_loc, bc_origin=bc_origin,
+            self, ne_grad_bc_loc,
             dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
             ne_inner=ne_inner,
         )
@@ -902,7 +901,6 @@ class ThreeDSolverMixin:
                       solver_structure="firedrake",
                       ne_inner_bc="neumann",
                       ne_grad_bc_loc="inner",
-                      bc_origin=None,
                       ne_inner=None,
                       dne_dx_inner=None,
                       dne_dx_outer=None,
@@ -953,7 +951,6 @@ class ThreeDSolverMixin:
                 free_params=free_params,
                 ne_inner_bc=ne_inner_bc,
                 ne_grad_bc_loc=ne_grad_bc_loc,
-                bc_origin=bc_origin,
                 ne_inner=ne_inner,
                 dne_dx_inner=dne_dx_inner,
                 dne_dx_outer=dne_dx_outer,
@@ -1000,7 +997,7 @@ class ThreeDSolverMixin:
         # as solver.py.solve_coupled, shared with the scipy driver.
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
-            self, ne_grad_bc_loc, bc_origin=bc_origin,
+            self, ne_grad_bc_loc,
             dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
             ne_inner=ne_inner, 
         )

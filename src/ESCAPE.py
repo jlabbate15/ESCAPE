@@ -9,9 +9,9 @@ import shutil
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.interpolate import interp1d
 
-ROOT = Path.cwd().parent.parent
+ROOT = Path(__file__).resolve().parent.parent  # ESCAPE root (src/..)
 sys.path.insert(0, str(ROOT))
-from src.saarelma_connor_api import saarelma_connor
+from src.saarelma_connor.saarelma_connor_api import saarelma_connor
 from src.ped_width_proxy import ped_width
 
 def ESCAPE(
@@ -180,19 +180,15 @@ def ESCAPE(
         print(f"ESCAPE Loop Iter {eped_iter}")
 
         if eped_iter == 0:
-            SOLVE_KW['bc_origin'] = "p-file"
             SOLVE_KW['initial_guess'] = "tanh"
             neutral_ic = {'nCX_ic': "scale nFC", 'nFC_ic': "solve"}
         elif eped_iter > 0 and ig=='solve': # bc
-            SOLVE_KW['bc_origin'] = "manual EPEDNN loop"
             SOLVE_KW['initial_guess'] = "tanh"
             neutral_ic = {'nCX_ic': "solve", 'nFC_ic': "solve"}
         elif eped_iter > 0 and ig=='manual': # bc+ig
-            SOLVE_KW['bc_origin'] = "manual EPEDNN loop"
             SOLVE_KW['initial_guess'] = "manual EPEDNN loop" # use previous loop's profiles as initial guess for ne, nFC, nCX
             neutral_ic = {'nCX_ic': "manual EPEDNN loop", 'nFC_ic': "manual EPEDNN loop"}
         elif eped_iter > 0 and ig=='fix': # fix; only T changes, the densities are fixed from the pfile
-            SOLVE_KW['bc_origin'] = "p-file"
             SOLVE_KW['initial_guess'] = "tanh"
             neutral_ic = {'nCX_ic': "solve", 'nFC_ic': "solve"}
         else:

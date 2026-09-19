@@ -19,16 +19,12 @@ except Exception as _firedrake_import_err:
     _FIREDRAKE_AVAILABLE = False
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
-from src import bc_ig_helpers as bcig
-from src.saarelma_connor_base import FREE_PARAM_NAMES
+from src.saarelma_connor import bc_ig_helpers as bcig
+from src.saarelma_connor.saarelma_connor_base import FREE_PARAM_NAMES
 
 
 # Conversion constant (eV -> J)
 _EV2J = 1.60218e-19
-
-# Free parameters of the model (all four must be set before solving).
-# Re-exported from the base class, which owns the canonical definition.
-_FREE_PARAM_NAMES = FREE_PARAM_NAMES
 
 
 class OneDSolverMixin:
@@ -409,7 +405,6 @@ class OneDSolverMixin:
     def solve_sc_scipy(self,
                        x_res=200,
                        free_params=None,
-                       bc_origin="p-file",
                        dne_dx_inner=None,
                        ne_grad_bc_loc="inner",
                        dne_dx_outer=None,
@@ -450,7 +445,7 @@ class OneDSolverMixin:
         n0 = self._n0_sc
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
-            self, ne_grad_bc_loc, bc_origin=bc_origin,
+            self, ne_grad_bc_loc,
             dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
             require_negative_slope=True,
         )
@@ -460,7 +455,7 @@ class OneDSolverMixin:
         # (N' - N'_in).  NOT a boundary condition -- see bc_ig_helpers --
         # so it keeps the pedestal-top slope in both pathways.
         dne_dx_C = bcig.resolve_integration_constant(
-            self, bc_origin=bc_origin, dne_dx_neginf=dne_dx_neginf,
+            self, dne_dx_neginf=dne_dx_neginf,
         )
         dN_in = (L / n0) * dne_dx_C
 
@@ -788,7 +783,6 @@ class OneDSolverMixin:
                            x_res=200,
                            fe_degree=2,
                            free_params=None,
-                           bc_origin="p-file",
                            dne_dx_inner=None,
                            ne_grad_bc_loc="inner",
                            dne_dx_outer=None,
@@ -843,7 +837,7 @@ class OneDSolverMixin:
         n0 = self._n0_sc
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
-            self, ne_grad_bc_loc, bc_origin=bc_origin,
+            self, ne_grad_bc_loc,
             dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
             require_negative_slope=True,
         )
@@ -852,7 +846,7 @@ class OneDSolverMixin:
         # Saarelma's constant of integration C -- NOT a boundary condition,
         # so it keeps the pedestal-top slope in both pathways.
         dne_dx_C = bcig.resolve_integration_constant(
-            self, bc_origin=bc_origin, dne_dx_neginf=dne_dx_neginf,
+            self, dne_dx_neginf=dne_dx_neginf,
         )
         dN_in_val = (L / n0) * dne_dx_C
         hat_nFC0 = self.nFC_x0 / n0 # non-dim

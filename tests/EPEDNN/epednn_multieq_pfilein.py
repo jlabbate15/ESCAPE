@@ -13,7 +13,7 @@ import numpy as np
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.solver_nondim import saarelma_connor_nondim
-from src.load_equil import initialize_inputs
+from ESCAPE.helpers.load_equil import initialize_inputs
 
 
 # ------------------------------------------------------------
