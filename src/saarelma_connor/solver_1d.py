@@ -20,7 +20,6 @@ except Exception as _firedrake_import_err:
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
 from src.saarelma_connor import bc_ig_helpers as bcig
-from src.saarelma_connor.saarelma_connor_base import FREE_PARAM_NAMES
 
 
 # Conversion constant (eV -> J)
@@ -39,7 +38,7 @@ class OneDSolverMixin:
 
     def _check_free_params_sc(self):
         """Backwards-compatible alias for :meth:`solver.check_free_params`."""
-        self.check_free_params()
+        self.check_free_params("1D")
 
     def _ensure_sc_setup(self, x_res, free_params=None, force=False):
         """Apply free parameters, build the solver grids, form factors and
@@ -48,7 +47,7 @@ class OneDSolverMixin:
         if not hasattr(self, "_fd_cache"):
             self._fd_cache = {}
 
-        self.apply_free_params(free_params)
+        self.apply_free_params(free_params, model="1D")
 
         # form_factor + setup_solver_grids (cached per x_res), exactly as
         # the parent's coupled solver does, then the ETG coefficient

@@ -1,3 +1,9 @@
+import numpy as np
+from scipy.interpolate import RectBivariateSpline, interp1d
+from scipy.integrate import simpson
+from scipy import constants
+
+
 class epednn_class:
     """Mixin adding the EPEDNN methods
     """

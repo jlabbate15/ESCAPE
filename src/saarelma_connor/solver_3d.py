@@ -666,7 +666,7 @@ class ThreeDSolverMixin:
         # Equilibrium / kinetic / ETG setup -- pure numpy, no Firedrake.
         # apply_free_params() first: construct_C_ETG() consumes De_chie_etg,
         # and the Picard gate below consumes alpha_crit / C_KBM.
-        self.apply_free_params(free_params)
+        self.apply_free_params(free_params, model="3D")
         self._ensure_firedrake_coefficient_grids(x_res, force=force_setup)
         self.construct_C_ETG()
 
@@ -977,7 +977,7 @@ class ThreeDSolverMixin:
         # ETG coefficient -- exactly the same setup as the parent class.
         # apply_free_params() first: construct_C_ETG() consumes De_chie_etg,
         # and the KBM gate consumes alpha_crit / C_KBM.
-        self.apply_free_params(free_params)
+        self.apply_free_params(free_params, model="3D")
         self._ensure_firedrake_coefficient_grids(x_res, force=force_setup)
         self.construct_C_ETG()
 

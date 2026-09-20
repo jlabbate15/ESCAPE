@@ -1,30 +1,13 @@
-import os
 import inspect
 import numpy as np
 from scipy.interpolate import RectBivariateSpline, interp1d
-from scipy.integrate import simpson, solve_bvp, cumulative_trapezoid
+from scipy.integrate import simpson, cumulative_trapezoid
 from scipy import constants
 import matplotlib.pyplot as plt
 from matplotlib.path import Path as _MplPath
 from src.adas.adas_ionisation import scd_adas
 from src.adas.adas_cx import scx_adas
 from src.radas.radas_rates import scd_radas, scx_radas
-try:
-    from firedrake import (
-        IntervalMesh, FunctionSpace, MixedFunctionSpace, Function,
-        TestFunctions, TrialFunction, Constant, DirichletBC,
-        dx, ds, split, solve, lhs, rhs,
-        LinearVariationalProblem, LinearVariationalSolver,
-        SpatialCoordinate,
-    )
-    _FIREDRAKE_AVAILABLE = True
-except Exception as _firedrake_import_err:  # raise an error if Firedrake is not available
-    _FIREDRAKE_AVAILABLE = False
-    _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
-
-
-# Free parameters of the model (all four must be set before solving).
-FREE_PARAM_NAMES = ("alpha_crit", "De_chie_etg", "C_KBM", "nFC_x0")
 
 
 class SaarelmaConnorBase:
@@ -75,37 +58,16 @@ class SaarelmaConnorBase:
     verbose : bool
         True if verbose output is desired, False if verbose output is not desired
     """
-    def __init__(
+    def init_saarelmaconnor(
         self,
-        Z_i = 1, # Z of ions
-        P_tot_e = None, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
-        ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from pfile)
         psi_N_inner_boundary = 0.85, # normalized poloidal flux at the inner boundary (boundary condition); overridden by find_inner_boundary if nFC_threshold or nCX_threshold is set
         nFC_threshold = None, # fraction of nFC at the separatrix below which the inner boundary is placed (None to disable)
         nCX_threshold = None, # fraction of nCX at the separatrix below which the inner boundary is placed (None to disable)
-        equil_params = None, # dictionary of required equilibrium parameters
-        kprof_params = None, # dictionary of required kinetic profile (density, temperature) parameters
-        T_rat_flag = True, # True if using a temperature ratio between ions and electrons, False if doing something else
-        T_rat = 1,
-        pol_norm = False, # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
-        species = 'D', # species of ions, currently supporting: D, D-T
-        initial_guess = 'pfile', # initial guess for the electron density profile, currently supporting: pfile, linear
-        regime_flag = 'PT H-mode', # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
+        initial_guess = None, # initial guess for the electron density profile
         x_method = 'radas', # method to use for the cross-section rates, currently supporting: 'adas', 'radas'
         verbose = False,
     ):
 
-        # User-specified flags
-        self.regime_flag = regime_flag
-        self.T_rat_flag = T_rat_flag
-        self.T_rat = T_rat
-        self.verbose = verbose
-        if self.verbose:
-            self.bvp_verbose = 2
-        else:
-            self.bvp_verbose = 0
-        self.pol_norm = pol_norm
-        self.psi_N_inner_boundary = psi_N_inner_boundary
         self.initial_guess = initial_guess
 
         # Inner boundary handling
@@ -123,46 +85,19 @@ class SaarelmaConnorBase:
             else:
                 raise NotImplementedError("nCX_threshold must be specified")
 
-        # Other constants
-        E_FC = 3 * 1.60218e-19, # J, Energy of Franck-Condon neutrals as defined in Mahdavi M.A., Maingi R., Groebner R.J., Leonard A.W., Osborne T.H. and Porter G. 2003 Phys. Plasmas 10 3984 J
-        self.mu0 = 4 * np.pi * 10**-7 # N/A**2, vacuum magnetic permeability constant
-        self.P_tot_e = P_tot_e
-        M_e = 9.109e-31, # kg, mass of electron
-        M_i = 1.673e-27, # kg, mass of hydrogen nuclei
-        self.M_i = M_i
-        if species == 'D':
-            self.M_eff = 2.0
-        elif species == 'D-T':
-            self.M_eff = 2.5
-        else:
-            assert False, 'species must be D or D-T'
-
-        # Load in equilibrium and kinetic profile quantities
-        self.set_equil_params(eq=equil_params)
-        self.set_kprof_params(kprof_params=kprof_params)
-        
-        # Calculate the magnetic field at each RZ grid point, sets self.B
-        self.calc_B(self.rgrid,self.zgrid)
-
-        # calculate the flux surface-averaged |grad(r)| and |grad(r)|^2 and some other quantities like r_psi (outboard midplane minor radius for each flux surface)
-        self.calc_gradr() # only a function of geometry
-
         # Calculate velocities
-        self.Z_i = Z_i
-        self.e_i = Z_i * constants.e # C
-        k_B = 1.38064852e-23 # J/K, Boltzmann constant
-        self.V_th_i = np.sqrt(2*k_B*self.T_i_K/(M_i*self.M_eff)) # m/s, per psi_N_eval for Ti
-        self.V_th_e = np.sqrt(2*k_B*self.T_e_K/M_e) # m/s, per psi_N_eval for Te
-        self.V_FC = np.sqrt(8*E_FC/((np.pi**2) * M_i*self.M_eff)) # m/s
-        self.V_cx = np.sqrt(2*k_B*self.T_i_K/(np.pi * M_i*self.M_eff)) # m/s, per psi_N_eval for Ti
+        self.V_th_i = np.sqrt(2*self.k_B*self.T_i_K/(self.M_i*self.M_eff)) # m/s, per psi_N_eval for Ti
+        self.V_th_e = np.sqrt(2*self.k_B*self.T_e_K/self.M_e) # m/s, per psi_N_eval for Te
+        self.V_FC = np.sqrt(8*self.E_FC/((np.pi**2) * self.M_i*self.M_eff)) # m/s
+        self.V_cx = np.sqrt(2*self.k_B*self.T_i_K/(np.pi * self.M_i*self.M_eff)) # m/s, per psi_N_eval for Ti
 
         # Load in cross-section rates, which are only a function of temperature if we use an average density (predictive models could provide a guess density)
-        self.cross_section_rates(species=species,x_method=x_method)
+        self.cross_section_rates(species=self.species,x_method=x_method)
 
         # Setup for diffusion coefficient that does not include free parameters and n_e
-        self.c_s = (self.e_i * self.T_e * 1e3 / (M_i * self.M_eff)) ** 0.5 # m/s, cs = (e*T_e/mD)^1/2, T_e in keV -> eV via 1e3, as defined in W. Guttenfelder et al 2021 Nucl. Fusion 61 056005
+        self.c_s = (self.e_i * self.T_e * 1e3 / (self.M_i * self.M_eff)) ** 0.5 # m/s, cs = (e*T_e/mD)^1/2, T_e in keV -> eV via 1e3, as defined in W. Guttenfelder et al 2021 Nucl. Fusion 61 056005
         V_th_i_rz = self.psi_rz_expand(self.V_th_i, psi_N_A='T_e')
-        self.rho_s = V_th_i_rz*M_i*self.M_eff / (self.e_i * self.B) # m, known on each RZ grid point
+        self.rho_s = V_th_i_rz*self.M_i*self.M_eff / (self.e_i * self.B) # m, known on each RZ grid point
         self.rho_s = self.fsa(self.rho_s,flux_surfaces='T_e') # m, known on each flux surface, outputs nan for psi_N < 0.01 or psi_N > 0.99
         valid = ~np.isnan(self.rho_s)
         self.rho_s = interp1d(self.psi_Te_eval[valid], self.rho_s[valid], kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_Te_eval) # removes nan values from rho_s
@@ -185,16 +120,8 @@ class SaarelmaConnorBase:
                          bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
 
         grad_Te = np.gradient(self.T_e_pres * (1.60218e-19), self.r_psi) # gradient in J/m, T_e_pres is in eV
-        self.D_ETG_x = P_tot_e / (self.S_plasma * abs(grad_Te)) # evaluated at each psi_N_pres, not including free parameter De_chie_etg and n_e
+        self.D_ETG_x = self.P_tot_e / (self.S_plasma * abs(grad_Te)) # evaluated at each psi_N_pres, not including free parameter De_chie_etg and n_e
         self.D_NEO = 0.05 * (self.c_s * self.rho_s**2) / self.a
-
-        # Outer Dirichlet boundary condition for electrons
-        if ne_x0 is None:
-            self.ne_x0 = self.n_e[-1]
-            self.ne_x0_manual = False
-        else:
-            self.ne_x0 = ne_x0
-            self.ne_x0_manual = True
 
 
     def calc_pressure_quantities_sc(self,n_e,x):
@@ -295,25 +222,41 @@ class SaarelmaConnorBase:
         self.invalidate_firedrake_cache()
 
 
-    def check_free_params(self):
-        """Raise if any of the four free parameters is unset.
+    def check_free_params(self, model):
+        """Raise if any of the free parameters of ``model`` is unset.
 
-        The model is undefined without all of ``FREE_PARAM_NAMES``; catching
+        The model is undefined without all of its free parameters; catching
         it here gives a readable error instead of a ``None`` propagating into
-        ``construct_C_ETG`` or the KBM gate.
+        ``construct_C_ETG`` or the KBM gate.  The 3D model needs one more
+        parameter (``ncx_x0_ratio``) than the 1D one.
+
+        Parameters
+        ----------
+        model : {'1D', '3D'}
+            Which solver's free-parameter set to validate.
         """
+        if model == '3D':
+            FREE_PARAM_NAMES = ("alpha_crit", "De_chie_etg", "C_KBM", "nFC_x0", "ncx_x0_ratio")
+        elif model == "1D":
+            FREE_PARAM_NAMES = ("alpha_crit", "De_chie_etg", "C_KBM", "nFC_x0")
+        else:
+            raise ValueError(
+                f"Unknown model {model!r}; expected '1D' or '3D'."
+            )
+
         missing = [n for n in FREE_PARAM_NAMES
                    if getattr(self, n, None) is None]
         if missing:
             raise ValueError(
-                "The Saarelma-Connor model needs all four free parameters; "
+                f"The Saarelma-Connor {model} model needs all "
+                f"{len(FREE_PARAM_NAMES)} free parameters "
+                f"({', '.join(FREE_PARAM_NAMES)}); "
                 f"missing: {', '.join(missing)}.  Set them on the "
-                "constructor, with update_free_params(), or pass "
-                "free_params={'alpha_crit': ..., 'De_chie_etg': ..., "
-                "'C_KBM': ..., 'nFC_x0': ...} to the solver."
+                "constructor, with update_free_params(), or pass them in "
+                "free_params={...} to the solver."
             )
 
-    def apply_free_params(self, free_params=None):
+    def apply_free_params(self, free_params=None, model=None):
         """Optionally update the free parameters, then validate them.
 
         Shared by every solver entry point so that ``free_params`` means the
@@ -330,6 +273,10 @@ class SaarelmaConnorBase:
             further keyword accepted by :meth:`update_free_params` (e.g.
             ``psi_N_inner_boundary``, ``ne_x0``) may be included and is
             forwarded.  None skips the update and only validates.
+        model : {'1D', '3D'}
+            Which solver's free-parameter set to validate against; passed
+            straight to :meth:`check_free_params`.  The 3D model additionally
+            requires ``ncx_x0_ratio``.
         """
         if free_params is not None:
             fp = dict(free_params)
@@ -340,7 +287,7 @@ class SaarelmaConnorBase:
                 fp.pop("nFC_x0", self.nFC_x0),
                 **fp,
             )
-        self.check_free_params()
+        self.check_free_params(model)
 
 
     def inner_boundary_limits(self, outer_threshold=None, safety_margin=0.01,
@@ -419,256 +366,6 @@ class SaarelmaConnorBase:
             psi_N_inner, psi_N_outer = psi_N_outer, psi_N_inner
 
         return psi_N_inner, psi_N_outer
-
-    def find_boundary_points(self,eq):
-        """Find the top/bottom/inboard/outboard extrema of the separatrix.
-
-        Parameters
-        ----------
-        eq : dict
-            Equilibrium dictionary returned by ``read_eqdsk``.  Must contain
-            keys: ``nr``, ``nz``, ``rleft``, ``rdim``, ``zmid``, ``zdim``,
-            ``psirz``, ``raxis``, ``zaxis``, ``psimag``, ``psibry``.
-            Optionally ``rzout`` (boundary R,Z points).
-
-        Returns
-        -------
-        result : dict
-            ``'top'``      – ``(R, Z)`` of the upper boundary point
-            ``'bottom'``   – ``(R, Z)`` of the lower boundary point
-            ``'outboard'``  – ``(R, Z)`` of the outboard boundary point
-            ``'inboard'``   – ``(R, Z)`` of the inboard boundary point
-        """
-
-        psi = eq['psirz']
-        psibry = eq['psibry']
-
-        if 'rzout' in eq and eq['rzout'] is not None and len(eq['rzout']) > 0:
-            bdy = eq['rzout']
-        else:
-            nr = eq['nr']
-            nz = eq['nz']
-            r = np.linspace(eq['rleft'], eq['rleft'] + eq['rdim'], nr)
-            z = np.linspace(eq['zmid'] - eq['zdim']/2, eq['zmid'] + eq['zdim']/2, nz)
-            import matplotlib
-            matplotlib.use('Agg')
-            fig, ax = plt.subplots()
-            cs = ax.contour(r, z, psi, levels=[psibry])
-            bdy = np.vstack(cs.allsegs[0])
-            plt.close(fig)
-        itop = np.argmax(bdy[:, 1])
-        ibot = np.argmin(bdy[:, 1])
-        iout = np.argmax(bdy[:, 0])
-        iin  = np.argmin(bdy[:, 0])
-        top      = (bdy[itop, 0], bdy[itop, 1])
-        bottom   = (bdy[ibot, 0], bdy[ibot, 1])
-        outboard = (bdy[iout, 0], bdy[iout, 1])
-        inboard  = (bdy[iin,  0], bdy[iin,  1])
-
-        return {
-            'top': top,
-            'bottom': bottom,
-            'outboard': outboard,
-            'inboard': inboard,
-        }
-
-    def plasma_surface_area_and_volume(self):
-        """Compute the plasma surface area and enclosed volume at each flux surface.
-
-        For each psi in np.linspace(psimag, psibry, len(self.pres)), extracts
-        the flux surface contour from the 2D psi grid, then computes the
-        toroidal surface area (Pappus' theorem) and volume (exact
-        piecewise-linear revolution integral) of the surface of revolution.
-
-        Parameters
-        ----------
-        self : object
-            instance of saarelma_connor class
-
-        Sets
-        ----
-        self.S_plasma : ndarray, shape (n_psi,)
-            Toroidal surface area (m^2) at each flux surface.
-        self.V_plasma : ndarray, shape (n_psi,)
-            Enclosed toroidal volume (m^3) at each flux surface.
-        """
-
-        n_psi = len(self.psi_pres)
-
-        self.S_plasma = np.zeros(n_psi)
-        self.V_plasma = np.zeros(n_psi)
-
-        # Magnetic axis, used to pick the closed core contour (not an open
-        # SOL / divertor-leg segment) at each psi level.  On double-null
-        # (e.g. SPARC / ARC) equilibria a given psi level also produces open
-        # contours that can be *longer* than the closed core surface, so the
-        # previous "longest segment" heuristic silently returned garbage
-        # volumes / areas (non-monotonic V, sign-flipping dV/dpsi).  Reuse the
-        # same selector as fsa() / calc_gradr().
-        R_axis = self.eq['raxis']
-        Z_axis = self.eq['zaxis']
-
-        # Extract the flux surface contour from the 2D psi grid
-        fig, ax = plt.subplots()
-        for i in range(n_psi):
-            ax.cla()
-            cs = ax.contour(self.rgrid, self.zgrid, self.psi_RZ,
-                            levels=[self.psi_pres[i]])
-
-            segs = cs.allsegs[0]
-            seg = self._select_core_contour(segs, R_axis, Z_axis)
-            if seg is None:
-                # No closed contour around the axis at this psi level
-                # (e.g. exactly at / beyond the separatrix); filled from
-                # valid neighbours below.
-                self.S_plasma[i] = np.nan
-                self.V_plasma[i] = np.nan
-                continue
-
-            R = seg[:, 0]
-            Z = seg[:, 1]
-
-            # Close the contour so the integral spans a full 2*pi
-            if not (np.isclose(R[0], R[-1]) and np.isclose(Z[0], Z[-1])):
-                R = np.append(R, R[0])
-                Z = np.append(Z, Z[0])
-
-            dZ = np.diff(Z)
-            dR = np.diff(R)
-            R_i  = R[:-1]
-            R_ip = R[1:]
-
-            # Toroidal volume:  V = (pi/3) |sum (Z_{i+1}-Z_i)(R_i^2 + R_i*R_{i+1} + R_{i+1}^2)|
-            # Exact integral of pi*R^2 dZ for piecewise-linear boundary segments
-            self.V_plasma[i] = (np.pi / 3.0) * abs(np.sum(dZ * (R_i**2 + R_i * R_ip + R_ip**2))) # m^3, volume enclosed by the plasma per poloidal flux
-
-            # Poloidal cross-section area: Shoelace formula - general to any polygon (Pappus' theorem)
-            dl = np.sqrt(dR**2 + dZ**2)
-            self.S_plasma[i] = 2.0 * np.pi * np.sum(0.5 * (R_i + R_ip) * dl) # m^2, total surface area of plasma
-
-        plt.close(fig)
-
-        # Fill NaN entries (surfaces where no closed core contour was found,
-        # typically right at / beyond the separatrix on diverted equilibria)
-        # by extrapolating from the nearest valid neighbours, mirroring
-        # calc_gradr().
-        for arr in (self.S_plasma, self.V_plasma):
-            valid = np.isfinite(arr)
-            if valid.any() and not valid.all():
-                arr[:] = interp1d(self.psi_N_pres[valid], arr[valid],
-                                  kind='linear', bounds_error=False,
-                                  fill_value='extrapolate')(self.psi_N_pres)
-
-    def calc_B(self,R_eval,Z_eval):
-        """Calculate magnetic field at some point in the plasma
-            Always use (rho,theta,var_zeta) coordinate convention as defined by https://crppwww.epfl.ch/~sauter/cocos/Sauter_COCOS_Tokamak_Coordinate_Conventions.pdf
-
-           Note: sigma_Bb is not important for this model, we will always use sigma_Bp=1.
-        Parameters
-        ----------
-        self : object
-            instance of saarelma_connor class
-        R_eval : float or array
-            radial location at which to evaluate the magnetic field
-        Z_eval : float or array
-            vertical location at which to evaluate the magnetic field
-        """
-
-        F = self.eq['fpol']
-        psi_F = np.linspace(self.eq['psimag'], self.eq['psibry'], len(F))
-
-        e_Bp = 1 if self.pol_norm else 0
-
-        r = self.rgrid
-        z = self.zgrid
-        spl = RectBivariateSpline(z, r, self.eq['psirz'])
-
-        R_eval_arr = np.atleast_1d(R_eval)
-        Z_eval_arr = np.atleast_1d(Z_eval)
-
-        psi = spl(Z_eval_arr, R_eval_arr, grid=False)
-        dpsi_dR = spl(Z_eval_arr, R_eval_arr, dx=0, dy=1, grid=False) # specifying dx, dy specifies the derivative order in the respective direction
-        dpsi_dZ = spl(Z_eval_arr, R_eval_arr, dx=1, dy=0, grid=False)
-        F_interp = interp1d(psi_F, F, kind='linear', bounds_error=False, fill_value="extrapolate")
-        B_R = (1 / ((2*np.pi)**e_Bp)) * dpsi_dZ / R_eval_arr # R component of the magnetic field
-        B_Z = (1 / ((2*np.pi)**e_Bp)) * -dpsi_dR / R_eval_arr # Z component of the magnetic field
-        B_phi = (F_interp(psi) / R_eval_arr) # T, toroidal magnetic field
-
-        self.B = np.sqrt(B_R**2 + B_Z**2 + B_phi**2) # T, total magnetic field at each R_eval, Z_eval
-        return self.B, [B_R, B_Z, B_phi]
-
-    def set_equil_params(self,eq):
-        self.eq = eq
-
-        bdry = self.find_boundary_points(eq=eq)
-
-        rmax_top = bdry['top'][0]
-        rmax_bottom = bdry['bottom'][0]
-        zmax_top = bdry['top'][1]
-        zmax_bottom = bdry['bottom'][1]
-        rmax_outboard = bdry['outboard'][0]
-        rmax_inboard = bdry['inboard'][0]
-        z_outboard = bdry['outboard'][1]
-        # zmax_inboard = bdry['inboard'][1]
-
-        # Geometric parameters
-        self.Raxis = self.eq['raxis'] # m, location of magnetic axis relative to device rotational line of toroidal symmetry
-        self.Rmajor = (rmax_outboard + rmax_inboard) / 2 # m
-        self.a = (rmax_outboard - rmax_inboard) / 2 # minor radius # m
-        delta_u = (self.Rmajor - rmax_top) / self.a
-        delta_l = (self.Rmajor - rmax_bottom) / self.a
-        self.delta = (delta_u + delta_l) / 2 # dimensionless, total triangularity
-        self.kappa = (zmax_top - zmax_bottom) / (2*self.a) # dimensionless, elongation
-
-        # Plasma parameters (skip the magnetic axis to avoid degenerate zero-area/volume flux surface)
-        self.Ip = self.eq['ip'] / 1e6 # MA, Plasma current
-        self.psi_pres = np.linspace(self.eq['psimag'], self.eq['psibry'], len(self.eq['pres']))[1:]
-        self.psi_N_pres = (self.psi_pres - self.eq['psimag']) / (self.eq['psibry'] - self.eq['psimag'])
-        # self.pres_gfile = self.eq['pres'][1:] # pressure is NOT an input to this model but using this for plotting - want to use pfile pressure instead
-
-        # Grids
-        self.rgrid = np.linspace(self.eq['rleft'],self.eq['rleft']+self.eq['rdim'],self.eq['nr']) # m, 1D R grid
-        self.zgrid = np.linspace(self.eq['zmid']-self.eq['zdim']/2,self.eq['zmid']+self.eq['zdim']/2,self.eq['nz']) # m, 1D Z grid
-        self.psi_RZ = self.eq['psirz'] # 2D poloidal flux array at each RZ grid point
-        self.psi_RZ_N = (self.psi_RZ - self.eq['psimag']) / (self.eq['psibry'] - self.eq['psimag']) # normalized poloidal flux at each RZ grid point
-        # self.rsep_mid = (((rmax_outboard - self.Raxis)**2) + ((z_outboard - self.eq['zaxis'])**2))**5 # separatrix radius at midplane
-
-        self.plasma_surface_area_and_volume()
-
-    def set_kprof_params(self,kprof_params):
-
-
-        #-------- electron information (required) --------#
-        self.T_e = kprof_params['T_e'] # keV
-        self.n_e = kprof_params['n_e'] # m^(-3)
-        self.psi_Te_eval = kprof_params['psin_Te'] # psi_N values at which T_e is evaluated
-        self.psi_ne_eval = kprof_params['psin_ne'] # psi_N values at which n_e is evaluated
-        
-        self.T_e_K = self.T_e * 1e3 * 11604.52 # T_e values (K) evaluated at psi_Te_eval
-
-
-        #-------- ion information (not required) --------#
-
-        # ion temperatures
-        if 'T_i' in kprof_params and 'psin_Ti' in kprof_params:
-            self.T_i_K = kprof_params['T_i'] * 1e3 * 11604.52 # K
-            self.psi_Ti_eval = kprof_params['psin_Ti']
-        elif self.T_rat_flag == True:
-            self.T_i = self.T_e * self.T_rat # keV
-            self.psi_Ti_eval = self.psi_Te_eval
-        else:
-            raise NotImplementedError("if T_i is not provided, must specify T_rat_flag")
-        self.T_i_K = self.T_i * 1e3 * 11604.52 # K
-
-        # ion densities
-        if 'n_i' in kprof_params and 'psin_ni' in kprof_params:
-            self.n_i = kprof_params['n_i'] # m^(-3)
-            self.psi_ni_eval = kprof_params['psin_ni']
-        elif self.quasineutral_flag == True:
-            self.n_i = self.n_e # m^(-3)
-            self.psi_ni_eval = self.psi_ne_eval
-        else:
-            raise NotImplementedError("if n_i is not provided, must use quasi-neutrality")
 
     def cross_section_rates(self,species='D',x_method='radas'):
         """Calculate ionization and charge-exchange rate coefficients.

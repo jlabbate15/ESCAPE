@@ -304,7 +304,7 @@ def build_ne_initial_guess(model, x_grid, initial_guess, bcs,
         xi = (x_grid - x_left) / (x_right - x_left)
         return ne_inner_val + (ne_outer_val - ne_inner_val) * xi
 
-    if initial_guess == "pfile":
+    if initial_guess == "kprof":
         return np.interp(x_grid, model.x_init, model.n_e_pres)
 
     if initial_guess == "tanh":

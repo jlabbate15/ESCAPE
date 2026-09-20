@@ -119,6 +119,7 @@ def ESCAPE(
     if model == '3D':
         ncx_x0_ratio = free_params['ncx_x0_ratio']
 
+    # keywords required for Saarelma-Connor model
     SOLVE_KW = dict(
         x_res=x_res,
         solver_structure=solver_structure,
@@ -128,13 +129,11 @@ def ESCAPE(
         picard_relax=picard_relax,
         verbose=verbose_sc,
     )
-
     if solver_structure == "firedrake":
         SOLVE_KW.update(
             fe_degree=2,
             linear_solver="lu",  # or "gamg" for GMRES + algebraic multigrid on J
         )
-
     if model == "3D":
         SOLVE_KW.update(
             ne_inner_bc=ne_inner_bc,
