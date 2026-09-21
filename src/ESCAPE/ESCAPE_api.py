@@ -3,7 +3,7 @@
 
 from src.saarelma_connor.saarelma_connor_api import saarelma_connor
 from src.epednn.epednn_call import epednn_class
-from src.ESCAPE_state import ESCAPE_state
+from src.ESCAPE.ESCAPE_state import ESCAPE_state
 
 
 class ESCAPE(ESCAPE_state, saarelma_connor, epednn_class):

@@ -9,8 +9,8 @@ from scipy.interpolate import interp1d
 
 ROOT = Path(__file__).resolve().parent.parent  # ESCAPE root (src/..)
 sys.path.insert(0, str(ROOT))
-from src.ESCAPE_api import ESCAPE
-from src.ped_width_proxy import ped_width
+from src.ESCAPE.ESCAPE_api import ESCAPE
+from helpers.ped_width_proxy import ped_width
 
 
 def ESCAPE_solve(
