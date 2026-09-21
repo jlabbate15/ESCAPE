@@ -502,7 +502,7 @@ class ThreeDSolverMixin:
                 f"[grad-bc] the nonlinear solve failed at the seed slope "
                 f"hat_dne/dxhat(-1) = {s:.3e}; the separatrix-gradient mode "
                 "has nothing to iterate from.  Try a different "
-                "initial_guess or dne_dx_inner (which seeds the search)."
+                "initial_guess or grad_bc_seed (which seeds the search)."
             )
 
         s_prev = r_prev = None
@@ -582,17 +582,6 @@ class ThreeDSolverMixin:
     # scipy (solve_bvp) implementation of the coupled three-equation model
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _check_solver_structure(solver_structure):
-        """Validate and normalise the discretisation-choice flag."""
-        s = str(solver_structure).lower()
-        if s not in ("firedrake", "scipy"):
-            raise ValueError(
-                f"solver_structure must be 'firedrake' or 'scipy', got "
-                f"{solver_structure!r}."
-            )
-        return s
-
     def _scipy_coefficients_nondim(self):
         """Linear interpolants (callables of hat_x) of the frozen non-dim
         coefficients for the scipy path.
@@ -621,8 +610,7 @@ class ThreeDSolverMixin:
                                    ne_inner_bc="neumann",
                                    ne_grad_bc_loc="inner",
                                    ne_inner=None,
-                                   dne_dx_inner=None,
-                                   dne_dx_outer=None,
+                                   dne_dx_bc=None,
                                    initial_guess="tanh",
                                    tanh_width=None,
                                    tanh_center=None,
@@ -651,11 +639,11 @@ class ThreeDSolverMixin:
         picard_gate_mode = str(picard_gate_mode).lower()
         if picard_gate_mode != "average":
             raise NotImplementedError(
-                "solver_structure='scipy' supports picard_gate_mode='average' "
+                "implementation='scipy' supports picard_gate_mode='average' "
                 f"only (got {picard_gate_mode!r}).  'majority' freezes the "
                 "local A/B KBM structure, which makes the conductance depend "
                 "on hat_n_e' and turns Phi -> hat_n_e' into a per-point "
-                "root-find; use solver_structure='firedrake' for it."
+                "root-find; use implementation='firedrake' for it."
             )
         picard_relax = float(picard_relax)
         if not (0.0 < picard_relax <= 1.0):
@@ -675,7 +663,7 @@ class ThreeDSolverMixin:
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc,
-            dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
+            dne_dx_bc=dne_dx_bc,
             ne_inner=ne_inner,
         )
         self.ne_bcs = nebcs
@@ -846,7 +834,7 @@ class ThreeDSolverMixin:
             "picard_gate_mode": picard_gate_mode,
             "picard_converged": picard_converged,
             "picard_iterations": n_picard,
-            "solver_structure": "scipy",
+            "implementation": "scipy",
         }
         if not picard_converged:
             raise RuntimeError(
@@ -898,12 +886,11 @@ class ThreeDSolverMixin:
                       x_res=20,
                       free_params=None,
                       fe_degree=2,
-                      solver_structure="firedrake",
+                      implementation="firedrake",
                       ne_inner_bc="neumann",
                       ne_grad_bc_loc="inner",
                       ne_inner=None,
-                      dne_dx_inner=None,
-                      dne_dx_outer=None,
+                      dne_dx_bc=None,
                       grad_bc_tol=1e-8,
                       grad_bc_max_it=25,
                       grad_bc_seed=None,
@@ -916,7 +903,7 @@ class ThreeDSolverMixin:
                       reuse_setup=True,
                       nCX_ic="solve",
                       nFC_ic="solve",
-                      kbm_treatment="inline",
+                      kbm_treatment="picard",
                       kbm_gate_eps=None,
                       picard_gate_mode="average",
                       picard_max_it=50,
@@ -929,7 +916,7 @@ class ThreeDSolverMixin:
                       ne_floor=1e-8,
                       verbose=None):
         """Non-dimensional coupled three-equation solver (Firedrake, or scipy
-        via ``solver_structure``) with SI inputs and outputs. Parameters, BCs
+        via ``implementation``) with SI inputs and outputs. Parameters, BCs
         and the KBM / neutral treatments are documented in
         docs/solver_3d_documentation.tex; returns the common result dict.
         """
@@ -942,8 +929,8 @@ class ThreeDSolverMixin:
 
         self._fd_cache = {}
 
-        solver_structure = self._check_solver_structure(solver_structure)
-        if solver_structure == "scipy":
+        implementation = self._check_implementation(implementation)
+        if implementation == "scipy":
             # Collocation instead of finite elements; see
             # solve_coupled_nondim_scipy for the flux-variable formulation.
             return self.solve_coupled_nondim_scipy(
@@ -952,8 +939,7 @@ class ThreeDSolverMixin:
                 ne_inner_bc=ne_inner_bc,
                 ne_grad_bc_loc=ne_grad_bc_loc,
                 ne_inner=ne_inner,
-                dne_dx_inner=dne_dx_inner,
-                dne_dx_outer=dne_dx_outer,
+                dne_dx_bc=dne_dx_bc,
                 initial_guess=initial_guess,
                 tanh_width=tanh_width,
                 tanh_center=tanh_center,
@@ -998,7 +984,7 @@ class ThreeDSolverMixin:
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc,
-            dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
+            dne_dx_bc=dne_dx_bc,
             ne_inner=ne_inner, 
         )
         self.ne_bcs = nebcs

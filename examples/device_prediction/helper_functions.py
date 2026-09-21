@@ -7,7 +7,7 @@ import tempfile
 import urllib.request # needed for geqdsk import
 ROOT = Path.cwd().parent.parent.parent
 sys.path.insert(0, str(ROOT))
-from src.profiles_loop_solve import profiles_loop_solve
+from src.ESCAPE.ESCAPE_solve import ESCAPE_solve
 
 tokamaker_python_path = os.getenv('OFT_ROOTPATH')
 if tokamaker_python_path is not None:

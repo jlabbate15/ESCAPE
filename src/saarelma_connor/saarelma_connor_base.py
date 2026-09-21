@@ -4,10 +4,10 @@ from scipy.interpolate import RectBivariateSpline, interp1d
 from scipy.integrate import simpson, cumulative_trapezoid
 from scipy import constants
 import matplotlib.pyplot as plt
-from matplotlib.path import Path as _MplPath
 from src.adas.adas_ionisation import scd_adas
 from src.adas.adas_cx import scx_adas
 from src.radas.radas_rates import scd_radas, scx_radas
+from src.ESCAPE.ESCAPE_state import ESCAPE_state
 try:
     from firedrake import (
         IntervalMesh, FunctionSpace, MixedFunctionSpace, Function,
@@ -55,12 +55,12 @@ class SaarelmaConnorBase:
         params,
     ):
 
-        psi_N_inner_boundary = params['psi_N_inner_boundary'], # normalized poloidal flux at the inner boundary (boundary condition); overridden by find_inner_boundary if nFC_threshold or nCX_threshold is set
-        nFC_threshold = params['nFC_threshold'], # fraction of nFC at the separatrix below which the inner boundary is placed (None to disable)
-        nCX_threshold = params['nCX_threshold'], # fraction of nCX at the separatrix below which the inner boundary is placed (None to disable)
-        initial_guess = params['initial_guess'], # initial guess for the electron density profile
-        x_method = params['x_method'], # method to use for the cross-section rates, currently supporting: 'adas', 'radas'
-        verbose = params['verbose'],
+        psi_N_inner_boundary = params['psi_N_inner_boundary'] # normalized poloidal flux at the inner boundary (boundary condition); overridden by find_inner_boundary if nFC_threshold or nCX_threshold is set
+        nFC_threshold = params['nFC_threshold'] # fraction of nFC at the separatrix below which the inner boundary is placed (None to disable)
+        nCX_threshold = params['nCX_threshold'] # fraction of nCX at the separatrix below which the inner boundary is placed (None to disable)
+        initial_guess = params['initial_guess'] # initial guess for the electron density profile
+        x_method = params['x_method'] # method to use for the cross-section rates, currently supporting: 'adas', 'radas'
+        verbose = params['verbose']
 
         self.initial_guess = initial_guess
 
@@ -90,7 +90,7 @@ class SaarelmaConnorBase:
 
         # Setup for diffusion coefficient that does not include free parameters and n_e
         self.c_s = (self.e_i * self.T_e * 1e3 / (self.M_i * self.M_eff)) ** 0.5 # m/s, cs = (e*T_e/mD)^1/2, T_e in keV -> eV via 1e3, as defined in W. Guttenfelder et al 2021 Nucl. Fusion 61 056005
-        V_th_i_rz = self.psi_rz_expand(self.V_th_i, psi_N_A='T_e')
+        V_th_i_rz = self.psi_rz_expand(self.V_th_i, psi_N_A='T_i')
         self.rho_s = V_th_i_rz*self.M_i*self.M_eff / (self.e_i * self.B) # m, known on each RZ grid point
         self.rho_s = self.fsa(self.rho_s,flux_surfaces='T_e') # m, known on each flux surface, outputs nan for psi_N < 0.01 or psi_N > 0.99
         valid = ~np.isnan(self.rho_s)
@@ -298,8 +298,7 @@ class SaarelmaConnorBase:
             Fraction of the most negative ``dn_e/dx`` used as the inner
             slope cutoff (see ``psi_inner_safety_margin`` in scan notebooks).
         x_res : int
-            Resolution passed to ``setup_solver_grids`` if it has not yet been
-            called on this instance.
+            Unused; ``setup_solver_grids`` builds its grid on ``psi_N_pres``.
         psi_N_default : float, default ``0.85``
             Default psi_N value used when no valid inner boundary is found.
         """
@@ -309,7 +308,7 @@ class SaarelmaConnorBase:
         if not hasattr(self, 'fCX'):
             self.form_factor(type='cx')
         if not hasattr(self, 'x_init') or not hasattr(self, 'S_i_pres'):
-            self.setup_solver_grids(res=x_res)
+            self.setup_solver_grids()
 
         # ---- OUTER limit ----------------------------------------------------
         saved_thr_fc = self.nFC_threshold
@@ -621,178 +620,6 @@ class SaarelmaConnorBase:
         self.x_inner = x_new
         print(f"x_inner: {self.x_inner:.4f} m")
 
-    @staticmethod
-    def _select_core_contour(segs, R_axis, Z_axis, closure_tol=0.05):
-        """Pick the closed flux-surface contour that encloses the magnetic
-        axis from a list of matplotlib contour segments.
-
-        Previously the *longest* segment was used, but on double-null
-        (e.g. SPARC) or diverted equilibria a given psi level also produces
-        open SOL / divertor-leg / private-flux contours which can be longer
-        than the closed core surface.  Integrating over one of those open,
-        theta-folded curves silently corrupts the flux-surface average
-        (it even produced *negative* <|grad r|^2>).
-
-        Parameters
-        ----------
-        segs : list of (N, 2) ndarray
-            Contour segments (R, Z) for one psi level.
-        R_axis, Z_axis : float
-            Magnetic axis position (m).
-        closure_tol : float
-            Segment counts as closed if the gap between its endpoints is
-            below ``closure_tol`` times its perimeter.
-
-        Returns
-        -------
-        seg : ndarray or None
-            The longest closed segment enclosing the axis, or None if no
-            segment qualifies (caller should treat the surface as invalid,
-            e.g. NaN + neighbour fill).
-        """
-        candidates = []
-        for s in segs:
-            if len(s) < 4:
-                continue
-            perim = np.hypot(np.diff(s[:, 0]), np.diff(s[:, 1])).sum()
-            if perim <= 0.0:
-                continue
-            gap = np.hypot(s[0, 0] - s[-1, 0], s[0, 1] - s[-1, 1])
-            if gap > closure_tol * perim:
-                continue  # open contour (SOL / divertor leg)
-            if not _MplPath(s).contains_point((R_axis, Z_axis)):
-                continue  # closed but not around the axis (island etc.)
-            candidates.append(s)
-        if not candidates:
-            return None
-        return max(candidates, key=lambda s: len(s))
-
-    @staticmethod
-    def _sort_dedup_close_theta(theta_c, R_c, Z_c, min_dtheta=1e-12):
-        """Sort contour points by poloidal angle, drop near-duplicate
-        angles, and close the contour over a full 2*pi.
-
-        Near-duplicate angles (e.g. the coincident first/last vertices of
-        a closed matplotlib contour, or point clusters near an X-point)
-        create ~1e-16-wide intervals; Simpson's nonuniform weights blow up
-        on the huge interval-length ratios and amplify round-off into
-        O(1e-4) errors in the flux-surface average.
-
-        Parameters
-        ----------
-        theta_c, R_c, Z_c : ndarray
-            Poloidal angle and contour coordinates (unsorted).
-        min_dtheta : float
-            Minimum allowed angular spacing between consecutive points.
-
-        Returns
-        -------
-        theta_c, R_c, Z_c : ndarray
-            Sorted, deduplicated arrays with the closing point
-            (theta[0] + 2*pi, R[0], Z[0]) appended.
-        """
-        idx = np.argsort(theta_c)
-        theta_c, R_c, Z_c = theta_c[idx], R_c[idx], Z_c[idx]
-
-        keep = np.concatenate(([True], np.diff(theta_c) > min_dtheta))
-        theta_c, R_c, Z_c = theta_c[keep], R_c[keep], Z_c[keep]
-
-        # Close the contour so the integral spans a full 2*pi; drop the
-        # last point first if it would duplicate the closing point.
-        if theta_c[0] + 2 * np.pi - theta_c[-1] <= min_dtheta:
-            theta_c, R_c, Z_c = theta_c[:-1], R_c[:-1], Z_c[:-1]
-        theta_c = np.append(theta_c, theta_c[0] + 2 * np.pi)
-        R_c = np.append(R_c, R_c[0])
-        Z_c = np.append(Z_c, Z_c[0])
-        return theta_c, R_c, Z_c
-
-    def calc_gradr(self):
-        """Compute <|grad(r)|> at each flux surface.
-
-        r is defined as the outboard-midplane minor radius for each flux
-        surface, making it a proper flux-surface label (one value per surface).
-        By the chain rule:
-            |grad(r)| = |dr/dpsi| * |grad(psi)|
-        This varies poloidally because |grad(psi)| is larger where flux
-        surfaces are compressed (inboard side) and smaller where they are
-        spread apart (outboard side).
-
-        The flux surface average is:
-            <|grad(r)|> = ∮ R² |grad(r)| dθ / ∮ R² dθ
-
-        Sets
-        ----
-        self.r_psi : ndarray, shape (n_psi,)
-            Outboard midplane minor radius for each flux surface (m).
-        self.gradr_c : ndarray, shape (n_psi,)
-            |grad(r)| at each contour point on each flux surface.
-        self.gradr_fsa : ndarray, shape (n_psi,)
-            Flux-surface-averaged |grad(r)| at each psi_N_pres surface.
-        self.gradr2_fsa : ndarray, shape (n_psi,)
-            Flux-surface-averaged |grad(r)|^2 at each psi_N_pres surface.
-        """
-        R_axis = self.eq['raxis']
-        Z_axis = self.eq['zaxis']
-
-        psi_spl = RectBivariateSpline(self.zgrid, self.rgrid, self.psi_RZ)
-        n_psi = len(self.psi_N_pres)
-
-        # r(psi): find outboard midplane crossing for each flux surface
-        R_out = np.linspace(R_axis, self.rgrid[-1], 500)
-        Z_mid = np.full_like(R_out, Z_axis)
-        psi_mid = psi_spl(Z_mid, R_out, grid=False)
-        sort_idx = np.argsort(psi_mid)
-        psi_to_R = interp1d(psi_mid[sort_idx], R_out[sort_idx], kind='linear',
-                            bounds_error=False, fill_value=np.nan)
-
-        self.r_psi = np.zeros(n_psi)
-        for i, psi_val in enumerate(self.psi_pres):
-            self.r_psi[i] = psi_to_R(psi_val) - R_axis
-
-        dr_dpsi = np.gradient(self.r_psi, self.psi_N_pres) # (m) / (dimensionless), change in r_midplane(psi_N) over psi_N
-
-        self.gradr_fsa = np.zeros(n_psi)
-        self.gradr2_fsa = np.zeros(n_psi)
-        fig, ax = plt.subplots()
-        for i, psi_val in enumerate(self.psi_pres):
-            ax.cla()
-            cs = ax.contour(self.rgrid, self.zgrid, self.psi_RZ,
-                            levels=[psi_val])
-            segs = cs.allsegs[0]
-            seg = self._select_core_contour(segs, R_axis, Z_axis)
-            if seg is None:
-                # No closed contour around the axis at this psi level
-                # (e.g. exactly at / beyond the separatrix); filled from
-                # valid neighbours below.
-                self.gradr_fsa[i] = np.nan
-                self.gradr2_fsa[i] = np.nan
-                continue
-            R_c, Z_c = seg[:, 0], seg[:, 1]
-
-            theta_c = np.arctan2(Z_c - Z_axis, R_c - R_axis) # theta at all points on contour
-            theta_c, R_c, Z_c = self._sort_dedup_close_theta(theta_c, R_c, Z_c)
-
-            # |grad(psi)| at each contour point from the equilibrium spline
-            dpsi_dR = psi_spl(Z_c, R_c, dx=0, dy=1, grid=False) # value at each point on the contour
-            dpsi_dZ = psi_spl(Z_c, R_c, dx=1, dy=0, grid=False) # value at each point on the contour
-            grad_psi_mag = np.sqrt(dpsi_dR**2 + dpsi_dZ**2) # value at each point on the contour
-
-            # |grad(r)| = |dr/dpsi| * |grad(psi)| at each contour point on each flux surface i
-            gradr_c = np.abs(dr_dpsi[i]) * grad_psi_mag
-
-            den = simpson(R_c**2, theta_c)
-            self.gradr_fsa[i] = simpson(R_c**2 * gradr_c, theta_c) / den
-            self.gradr2_fsa[i] = simpson(R_c**2 * gradr_c**2, theta_c) / den
-        plt.close(fig)
-
-        # Fill NaN/zero entries (near-axis or separatrix edge cases) by extrapolating from the nearest valid neighbours.
-        for arr in (self.r_psi, self.gradr_fsa, self.gradr2_fsa):
-            valid = np.isfinite(arr) & (arr != 0)
-            if valid.any() and not valid.all():
-                arr[:] = interp1d(self.psi_N_pres[valid], arr[valid],
-                                  kind='linear', bounds_error=False,
-                                  fill_value='extrapolate')(self.psi_N_pres)
-    
     def non_dimensionalize(self, x, y, L=None, n0=None):
         """Non-dimensionalize the BVP variables.
 
@@ -987,7 +814,7 @@ class SaarelmaConnorBase:
         """Run ``form_factor`` + ``setup_solver_grids`` once per ``x_res``."""
         key = int(x_res)
         if force or self._fd_cache.get("x_res") != key:
-            self.setup_solver_grids(res=x_res)
+            self.setup_solver_grids()
             self.form_factor(type='FC',x=self.x_init)
             self.form_factor(type='cx',x=self.x_init)
             self._fd_cache["x_res"] = key
@@ -1177,7 +1004,7 @@ class SaarelmaConnorBase:
             segs = cs.allsegs[0]
             # Closed contour around the axis = the real flux surface
             # (not open SOL/divertor legs or islands).
-            seg = self._select_core_contour(segs, R_axis, Z_axis)
+            seg = ESCAPE_state._select_core_contour(segs, R_axis, Z_axis)
             if seg is None:
                 continue  # stays NaN; callers interpolate over gaps
             R_c, Z_c = seg[:, 0], seg[:, 1] # R, Z coordinates of the contour
@@ -1186,7 +1013,7 @@ class SaarelmaConnorBase:
             # R_c_ax = (((R_c - R_axis)**2) + ((Z_c - Z_axis)**2))**0.5
             # theta_c = np.arcsin( (Z_c - Z_axis) / R_c_ax )
             theta_c = np.arctan2(Z_c - Z_axis, R_c - R_axis) # theta at all points on contour
-            theta_c, R_c, Z_c = self._sort_dedup_close_theta(theta_c, R_c, Z_c)
+            theta_c, R_c, Z_c = ESCAPE_state._sort_dedup_close_theta(theta_c, R_c, Z_c)
 
             A_c = A_spl(Z_c, R_c, grid=False)
 
@@ -1221,6 +1048,8 @@ class SaarelmaConnorBase:
         # psi_N values at which A is defined
         if psi_N_A == 'T_e':
             psi_N_A = self.psi_Te_eval # 1D array of psi_N values at which T_e is evaluated
+        elif psi_N_A == 'T_i':
+            psi_N_A = self.psi_Ti_eval # 1D array of psi_N values at which T_i is evaluated
         else:
             assert False, 'valid psi_N_A method must be provided'
 
@@ -1268,75 +1097,99 @@ class SaarelmaConnorBase:
                 f"'3D' (aliases: 'coupled', 'nondim'); got {model!r}."
             ) from None
 
+    @staticmethod
+    def _check_implementation(implementation):
+        """Validate and normalise the discretisation backend flag."""
+        s = str(implementation).strip().lower()
+        if s not in ("firedrake", "scipy"):
+            raise ValueError(
+                f"implementation must be 'firedrake' or 'scipy', got "
+                f"{implementation!r}."
+            )
+        return s
+
+    #: Arguments of ``solve_coupled_nondim`` that only its scipy backend
+    #: reads (the Firedrake path never touches them).
+    _SCIPY_ONLY_3D_KWARGS = frozenset({'bvp_tol', 'bvp_max_nodes', 'ne_floor'})
+
     def _solve_signature_owners(self, model, backend=None):
         """Methods whose signatures define the kwargs accepted by `model`.
 
-        ``solve_coupled_nondim`` declares every argument of both of its
-        backends explicitly, so it is its own authority.  ``solve_sc`` only
-        forwards ``**kwargs``, so the authority is the concrete backend --
-        and the two differ (``bvp_*`` for scipy, ``fe_degree``/``ksp_*``
-        for Firedrake).  With ``backend=None`` every backend of the model
-        is returned, which is what the "did you mean the other model?"
-        half of the error message needs.
+        The authority is the concrete backend: ``solve_sc_scipy`` /
+        ``solve_sc_firedrake`` for 1D, ``solve_coupled_nondim_scipy`` /
+        ``solve_coupled_nondim`` for 3D.  ``solve_coupled_nondim`` also
+        declares the scipy-only arguments (it forwards them), so those are
+        removed in :meth:`_accepted_solve_kwargs`.  With ``backend=None``
+        every backend of the model is returned.
         """
-        if model == '3D':
-            names = ['solve_coupled_nondim']
-        elif backend is None:
-            names = ['solve_sc_firedrake', 'solve_sc_scipy']
+        owners = {
+            ('1D', 'firedrake'): ['solve_sc_firedrake'],
+            ('1D', 'scipy'): ['solve_sc_scipy'],
+            ('3D', 'firedrake'): ['solve_coupled_nondim'],
+            ('3D', 'scipy'): ['solve_coupled_nondim_scipy'],
+        }
+        if backend is None:
+            names = owners[(model, 'firedrake')] + owners[(model, 'scipy')]
         else:
-            names = {'firedrake': ['solve_sc_firedrake'],
-                     'scipy': ['solve_sc_scipy']}.get(str(backend).strip().lower())
-            if names is None:
-                raise ValueError(
-                    f"solver_structure must be 'firedrake' or 'scipy' for "
-                    f"model='1D'; got {backend!r}."
-                )
+            names = owners[(model, self._check_implementation(backend))]
         return [getattr(self, name) for name in names if hasattr(self, name)]
 
     def _accepted_solve_kwargs(self, model, backend=None):
-        """Keyword names accepted by `model` (optionally a single backend)."""
+        """Keyword names that have an effect for `model` (optionally a single
+        backend)."""
         accepted = set()
         for method in self._solve_signature_owners(model, backend):
             for name, param in inspect.signature(method).parameters.items():
                 if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
                                   inspect.Parameter.KEYWORD_ONLY):
                     accepted.add(name)
+        if model == '3D' and backend is not None and \
+                self._check_implementation(backend) == 'firedrake':
+            accepted -= self._SCIPY_ONLY_3D_KWARGS
+        accepted.discard('implementation')  # set by solve_scmodel itself
         return accepted
 
-    def _check_solve_kwargs(self, model, backend, kwargs):
-        """Reject kwargs the chosen model/backend cannot accept.
+    def _filter_solve_kwargs(self, model, backend, kwargs):
+        """Drop kwargs that have no effect on the chosen model/backend,
+        printing which ones were dropped and why (on the first call on this
+        instance only, so an ESCAPE loop does not repeat it every iteration).
 
-        The caller owns the ``SOLVE_KW`` dict it hands to :meth:`solve`, so a
-        stray key has to fail loudly here rather than be silently dropped on
-        the way into a solver that would then quietly use its default.
+        This lets one parameter dict (e.g. ``sc_params`` in ESCAPE_solve,
+        which also holds the ``init_saarelmaconnor`` settings and the
+        arguments of the other model/backend) drive any solver.
+
+        Returns
+        -------
+        dict
+            The kwargs the chosen solver will actually use.
         """
         accepted = self._accepted_solve_kwargs(model, backend)
-        unknown = sorted(set(kwargs) - accepted)
-        if not unknown:
-            return
+        unused = sorted(set(kwargs) - accepted)
+        if not unused:
+            return dict(kwargs)
 
         other = '1D' if model == '3D' else '3D'
         other_accepted = self._accepted_solve_kwargs(other)
         this_model_accepted = self._accepted_solve_kwargs(model)
 
-        detail = []
-        for name in unknown:
-            if name in this_model_accepted:
-                detail.append(f"{name!r} (valid for model={model!r}, but not "
-                              f"with solver_structure={backend!r})")
-            elif name in other_accepted:
-                detail.append(f"{name!r} (belongs to model={other!r})")
-            else:
-                detail.append(f"{name!r} (not an argument of any solver)")
+        if not getattr(self, '_unused_solve_kwargs_reported', False):
+            detail = []
+            for name in unused:
+                if name in this_model_accepted:
+                    detail.append(f"{name} (only for the other implementation)")
+                elif name in other_accepted:
+                    detail.append(f"{name} (only for model={other!r})")
+                else:
+                    detail.append(f"{name} (not a solver argument)")
+            print(f"solve_scmodel(model={model!r}, implementation={backend!r}): "
+                  f"not using {', '.join(detail)}")
+            self._unused_solve_kwargs_reported = True
 
-        raise TypeError(
-            f"solve(model={model!r}, solver_structure={backend!r}) got "
-            f"unsupported keyword argument(s): {', '.join(detail)}.\n"
-            f"Accepted here: {', '.join(sorted(accepted))}."
-        )
+        return {k: v for k, v in kwargs.items() if k in accepted}
 
-    def solve_scmodel(self, model='3D', **kwargs):
-        """Solve the pedestal problem with the chosen physics model.
+    def solve_scmodel(self, model, implementation, **kwargs):
+        """Solve the pedestal problem with the chosen physics model and
+        discretisation backend.
 
         Parameters
         ----------
@@ -1349,15 +1202,17 @@ class SaarelmaConnorBase:
 
             Note this counts *equations*, not spatial dimensions: both
             models are one-dimensional in space.
-        solver_structure : {'firedrake', 'scipy'}, optional
-            Discretisation backend, default ``'firedrake'``.  Accepted for
-            both models, so a single kwargs dict can drive either;
-            ``implementation`` is accepted as a synonym (it is the name
-            :meth:`solve_sc` uses internally).
+        implementation : {'firedrake', 'scipy'}
+            Discretisation backend, for either model.
+        free_params : dict, optional (in ``**kwargs``)
+            Free parameters (``alpha_crit``, ``C_KBM``, ``De_chie_etg``,
+            ``nFC_x0``, and ``ncx_x0_ratio`` for 3D).  Set on the state via
+            :meth:`update_free_params` before dispatching, so they need not
+            have been set earlier; the solver then validates them.
         **kwargs
-            Passed to the chosen solver.  Arguments the target does not
-            accept raise ``TypeError`` naming the offending key rather than
-            being dropped.
+            Passed to the chosen solver.  Arguments that have no effect on
+            the chosen model/implementation are dropped, and their names
+            printed; see :meth:`_filter_solve_kwargs`.
 
         Returns
         -------
@@ -1365,13 +1220,16 @@ class SaarelmaConnorBase:
             See :meth:`_build_result_dict`.
         """
         model = self._normalise_model(model)
+        implementation = self._check_implementation(implementation)
         kwargs = dict(kwargs)
 
-        backend = kwargs.pop('solver_structure', None)
-        if backend is None:
-            raise ValueError("need to define solver structure")
+        # Initialise the free parameters here rather than in the solver's
+        # apply_free_params, whose getattr defaults need them already set.
+        free_params = kwargs.pop('free_params', None)
+        if free_params is not None:
+            self.update_free_params(**free_params)
 
-        self._check_solve_kwargs(model, backend, kwargs)
+        kwargs = self._filter_solve_kwargs(model, implementation, kwargs)
 
         entry_point = self._MODEL_ENTRY_POINTS[model]
         try:
@@ -1383,10 +1241,9 @@ class SaarelmaConnorBase:
                 f"model from src.saarelma_connor.saarelma_connor_api.saarelma_connor."
             ) from None
 
-        backend_kw = 'solver_structure' if model == '3D' else 'implementation'
-        return solver(**{backend_kw: backend}, **kwargs)
+        return solver(implementation=implementation, **kwargs)
 
-    def _build_result_dict(self, model, solver_structure):
+    def _build_result_dict(self, model, implementation):
         """Assemble the common result dictionary returned by every solver.
 
         Both models fill the same keys, so callers parse one schema
@@ -1396,13 +1253,13 @@ class SaarelmaConnorBase:
         ----------
         model : {'1D', '3D'}
             Which model produced the solution currently on the instance.
-        solver_structure : {'firedrake', 'scipy'}
+        implementation : {'firedrake', 'scipy'}
             Which backend produced it.
 
         Returns
         -------
         dict
-            ``model``, ``solver_structure`` : str
+            ``model``, ``implementation`` : str
 
             ``x`` : ndarray
                 Radial grid (m), zero at the separatrix.
@@ -1446,7 +1303,7 @@ class SaarelmaConnorBase:
 
         self.result = {
             'model': model,
-            'solver_structure': str(solver_structure),
+            'implementation': str(implementation),
             'x': x,
             'ne': ne,
             'dne_dx': dne_dx,

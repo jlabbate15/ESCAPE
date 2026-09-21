@@ -5,9 +5,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --time=24:00:00
-#SBATCH --output=DIII-D_param_scan%j.out
-#SBATCH --error=DIII-D_param_scan%j.err
-#SBATCH --chdir=/mnt/homes_global/jal2351/software/saarelma-conner-ped/examples/device_prediction/DIII-D
+#SBATCH --output=DIII-D_scan%j.out
+#SBATCH --error=DIII-D_scan%j.err
+#SBATCH --chdir=/mnt/homes_global/jal2351/software/ESCAPE/examples/device_prediction/DIII-D
 
 set -euo pipefail
 

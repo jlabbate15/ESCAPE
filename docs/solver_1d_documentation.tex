@@ -268,7 +268,7 @@ boundary condition:
 In \code{"inner"} mode the two coincide, which is self-consistent: imposing
 $N'(-1)=N'_{\mathrm{in}}$ makes the source vanish exactly at the inner
 boundary. In \code{"outer"} mode only the first role moves; $C$ keeps the
-inner slope from \code{dne_dx_inner} / \code{bc_origin}, because it is a
+pedestal-top slope (or \code{dne_dx_neginf} if given), because it is a
 model constant rather than a boundary condition.
 
 \paragraph{Implementation.} \code{solve_sc_scipy} imposes the
@@ -476,7 +476,7 @@ inner-boundary gradient, the pedestal width and the $\Dped$ shape.
 Saarelma \emph{et al.} (2023) only use it as ``a convenient starting
 point'' for the Eq.~(7) iteration, so when it fails the Picard loop can
 equally well start from the initial guess. Suggested remedies:
-\code{first_step="skip"}, a shallower \code{dne_dx_inner}, or an inner
+\code{first_step="skip"}, a shallower \code{dne_dx_bc}, or an inner
 boundary closer to the separatrix.
 
 \subsection{\code{_record_picard_sc(tag, converged, n_it, history, picard_max_it, picard_relax, picard_rtol)}}
@@ -507,26 +507,21 @@ changing.
   mesh.
   \item[\code{free_params} (dict or None)] Optional free parameters applied
   before solving; see \code{_ensure_sc_setup}.
-  \item[\code{bc_origin} (\code{"p-file"} | \code{"user"})] Where the
-  prescribed slopes come from: the p-file density gradient, or the
-  user-supplied \code{dne_dx_inner} / \code{dne_dx_outer}.
-  \item[\code{dne_dx_inner} (float or None)] SI inner-boundary slope
-  (m$^{-4}$, must be negative) when \code{bc_origin="user"}. Always supplies
-  Saarelma's constant of integration $C$ in the source term, whatever
-  \code{ne_grad_bc_loc} is; it is additionally the Neumann BC value in
-  \code{ne_grad_bc_loc="inner"} mode.
   \item[\code{ne_grad_bc_loc} (\code{"inner"} | \code{"outer"})] Which end
   carries the prescribed $dn_e/dx$; see Section~\ref{sec:bcs}.
   \code{"outer"} puts both $n_e$ conditions at the separatrix and leaves the
   inner boundary free.
-  \item[\code{dne_dx_outer} (float or None)] SI separatrix slope
-  $dn_e/dx|_{x=0}$ (m$^{-4}$, must be negative) used when
-  \code{ne_grad_bc_loc="outer"}. Given explicitly it wins for any
-  \code{bc_origin} (this is how Saarelma Eq.~(20) is fed in); left
-  \code{None} it is read off the p-file gradient at $x=0$, which requires
-  \code{bc_origin="p-file"}.
-  \item[\code{dne_dx_neginf} (float or None)] Override for the integration
-  constant $C$ (resolved by \code{bc_ig_helpers.resolve_integration_constant}).
+  \item[\code{dne_dx_bc} (float or None)] SI Neumann slope (m$^{-4}$, must
+  be negative), imposed at $x_{\mathrm{inner}}$ when
+  \code{ne_grad_bc_loc="inner"} and at the separatrix when
+  \code{ne_grad_bc_loc="outer"} (this is how Saarelma Eq.~(20) is fed in).
+  Left \code{None} it is read off the gradient of \code{state.n_e} at that
+  location (resolved by \code{bc_ig_helpers.resolve_ne_bcs}).
+  \item[\code{dne_dx_neginf} (float or None)] Saarelma's constant of
+  integration $C$ in the source term, in either \code{ne_grad_bc_loc} mode.
+  Left \code{None} it is read off the gradient of \code{state.n_e} at
+  $x_{\mathrm{inner}}$ (resolved by
+  \code{bc_ig_helpers.resolve_integration_constant}).
   \item[\code{initial_guess} (\code{"pfile"} | \code{"linear"} | \code{"tanh"})]
   Shape of the initial $n_e$ profile (SI).
   \item[\code{tanh_width}, \code{tanh_center} (float or None)] Parameters
@@ -669,7 +664,7 @@ guess so the form is well defined from the start.
 \paragraph{\code{"outer"} mode.} With \code{ne_grad_bc_loc="outer"} the
 Dirichlet $N(0)=1$ stays but the inner boundary is freed and its
 \code{ds(1)} flux becomes the unknown that a secant iteration adjusts until
-$N'(0)$ matches \code{dne_dx_outer} (see Section~\ref{sec:bcs} for why a
+$N'(0)$ matches \code{dne_dx_bc} (see Section~\ref{sec:bcs} for why a
 \code{ds(2)} term cannot impose it directly). Every nonlinear solve ---
 step 1 and each Picard iteration of step 2 --- is wrapped in that
 iteration, with the slope carrying over so later shootings start close.

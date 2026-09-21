@@ -126,7 +126,7 @@ class OneDSolverMixin:
                 f"[{tag} grad-bc] the nonlinear solve failed at the seed "
                 f"slope N'(-1) = {s:.3e}; the separatrix-gradient mode has "
                 "nothing to iterate from.  Try a different initial_guess "
-                "or dne_dx_inner (which seeds the search)."
+                "or grad_bc_seed (which seeds the search)."
             )
 
         s_prev = r_prev = None
@@ -339,7 +339,7 @@ class OneDSolverMixin:
             "D_ped shape make the amplification exp(int C_A6 N dxi) too "
             "large.  Remedies: first_step='skip' (start the Eq. 7 Picard "
             "loop from the initial guess, which is all Saarelma et al. "
-            "use Eq. 16 for), a shallower dne_dx_inner, or an inner "
+            "use Eq. 16 for), a shallower dne_dx_bc, or an inner "
             "boundary closer to the separatrix."
         )
         if first_step == "eq6":
@@ -404,9 +404,8 @@ class OneDSolverMixin:
     def solve_sc_scipy(self,
                        x_res=200,
                        free_params=None,
-                       dne_dx_inner=None,
                        ne_grad_bc_loc="inner",
-                       dne_dx_outer=None,
+                       dne_dx_bc=None,
                        dne_dx_neginf=None,
                        initial_guess="pfile",
                        tanh_width=None,
@@ -445,7 +444,7 @@ class OneDSolverMixin:
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc,
-            dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
+            dne_dx_bc=dne_dx_bc,
             require_negative_slope=True,
         )
         self.ne_bcs = nebcs
@@ -560,7 +559,7 @@ class OneDSolverMixin:
         if first_step != "skip":
             sol = solve_bvp(ode_first, bc, xi_grid, Y_guess,
                             tol=bvp_tol, max_nodes=int(bvp_max_nodes),
-                            verbose=self.bvp_verbose)
+                            verbose=2 if v else 0)
             err = None
             if not sol.success:
                 err = RuntimeError(sol.message)
@@ -657,7 +656,7 @@ class OneDSolverMixin:
             sol = solve_bvp(ode_full, bc, xi_grid,
                             np.vstack([N_guess, dN_guess]),
                             tol=bvp_tol, max_nodes=int(bvp_max_nodes),
-                            verbose=self.bvp_verbose)
+                            verbose=2 if v else 0)
             if not sol.success:
                 raise RuntimeError(
                     f"[sc scipy] Picard iteration {it} BVP failed: "
@@ -782,9 +781,8 @@ class OneDSolverMixin:
                            x_res=200,
                            fe_degree=2,
                            free_params=None,
-                           dne_dx_inner=None,
                            ne_grad_bc_loc="inner",
-                           dne_dx_outer=None,
+                           dne_dx_bc=None,
                            dne_dx_neginf=None,
                            grad_bc_tol=1e-8,
                            grad_bc_max_it=25,
@@ -837,7 +835,7 @@ class OneDSolverMixin:
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc,
-            dne_dx=(dne_dx_outer if ne_grad_bc_loc == "outer" else dne_dx_inner),
+            dne_dx_bc=dne_dx_bc,
             require_negative_slope=True,
         )
         self.ne_bcs = nebcs
@@ -1112,16 +1110,16 @@ class OneDSolverMixin:
     # Dispatcher
     # ------------------------------------------------------------------
 
-    def solve_sc(self, solver_structure="firedrake", **kwargs):
+    def solve_sc(self, implementation="firedrake", **kwargs):
         """Dispatch to :meth:`solve_sc_firedrake` or :meth:`solve_sc_scipy`
-        according to ``solver_structure``.
+        according to ``implementation``.
         """
-        solver_structure = str(solver_structure).lower()
-        if solver_structure == "firedrake":
+        implementation = str(implementation).lower()
+        if implementation == "firedrake":
             return self.solve_sc_firedrake(**kwargs)
-        if solver_structure == "scipy":
+        if implementation == "scipy":
             return self.solve_sc_scipy(**kwargs)
         raise ValueError(
-            f"solver_structure must be 'firedrake' or 'scipy', got "
-            f"{solver_structure!r}."
+            f"implementation must be 'firedrake' or 'scipy', got "
+            f"{implementation!r}."
         )

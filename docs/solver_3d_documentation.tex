@@ -125,7 +125,7 @@ prescribed $dn_e/dx$.
 each end:
 \begin{align*}
 \hne(0) &= 1, \qquad \nFC(0) = \code{nFC_x0}/n_0, \qquad \nCX(0) = \code{nCX_x0}/n_0,\\
-\hne'(-1) &= L\,\code{dne_dx_inner}/n_0 \quad\text{(Neumann flux on ds(1))}.
+\hne'(-1) &= L\,\code{dne_dx_bc}/n_0 \quad\text{(Neumann flux on ds(1))}.
 \end{align*}
 (A Dirichlet inner condition $\hne(-1)=\code{ne_inner}/n_0$ was the legacy
 alternative; \code{ne_inner_bc} values other than \code{"neumann"} are now
@@ -134,7 +134,7 @@ rejected by \code{bc_ig_helpers.reject_legacy_ne_inner_bc}.)
 \paragraph{\code{"outer"}.} Both $n_e$ conditions sit at the separatrix,
 and the inner boundary is left completely free:
 \[
-\hne(0) = 1,\quad \hne'(0) = L\,\code{dne_dx_outer}/n_0,\quad
+\hne(0) = 1,\quad \hne'(0) = L\,\code{dne_dx_bc}/n_0,\quad
 \nFC(0) = \code{nFC_x0}/n_0,\quad \nCX(0) = \code{nCX_x0}/n_0,
 \]
 with nothing imposed at $\h x=-1$. This is the boundary-condition set of
@@ -566,15 +566,15 @@ automatic inner-boundary search is no longer offered).
   of the domain carries the prescribed $dn_e/dx$. \code{"outer"} frees the
   inner boundary entirely (the \code{ds(1)} flux becomes the unknown that
   the separatrix gradient determines).
-  \item[\code{bc_origin}, \code{ne_inner}, \code{dne_dx_inner}] Origin and
-  values of the boundary data (resolved by
-  \code{bc_ig_helpers.resolve_ne_bcs}).
-  \item[\code{dne_dx_outer} (float or None)] SI separatrix slope
-  $dn_e/dx|_{x=0}$ (m$^{-4}$) used when \code{ne_grad_bc_loc="outer"}.
-  Taken from the same origins as the inner slope: given explicitly it wins
-  for any \code{bc_origin} (this is how Saarelma Eq.~(20) is fed in); left
-  \code{None} it is read off the p-file gradient at $x=0$, which requires a
-  p-file-backed \code{bc_origin}.
+  \item[\code{dne_dx_bc} (float or None)] SI Neumann slope (m$^{-4}$),
+  imposed at $x_{\mathrm{inner}}$ when \code{ne_grad_bc_loc="inner"} and at
+  the separatrix when \code{ne_grad_bc_loc="outer"} (this is how Saarelma
+  Eq.~(20) is fed in). Left \code{None} it is read off the gradient of
+  \code{state.n_e} at that location.
+  \item[\code{ne_inner} (float or None)] Pedestal-top density (m$^{-3}$)
+  used only to shape the initial guess. Left \code{None} it is read off
+  \code{state.n_e} at $x_{\mathrm{inner}}$. Both are resolved by
+  \code{bc_ig_helpers.resolve_ne_bcs}.
   \item[\code{grad_bc_tol} (float, $10^{-8}$)] Relative tolerance on
   $\hne'(0)-\text{target}$ for the \code{"outer"} secant iteration.
   \item[\code{grad_bc_max_it} (int, 25)] Maximum secant iterations for the

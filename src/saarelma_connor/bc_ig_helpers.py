@@ -1,8 +1,8 @@
 """Master electron-density boundary-condition and initial-guess helpers.
 
 Every Saarelma--Connor solver in this repository -- the original
-one-equation model (``solver_sc.saarelma_connor_sc.solve_sc_scipy`` and
-``.solve_sc_firedrake``) and the coupled three-equation model
+one-equation state (``solver_sc.saarelma_connor_sc.solve_sc_scipy`` and
+``.solve_sc_firedrake``) and the coupled three-equation state
 (``solver_nondim.saarelma_connor_nondim.solve_coupled_nondim`` and
 ``.solve_coupled_nondim_scipy``) -- resolves its n_e boundary conditions
 and builds its n_e initial guess *here*, so the four cannot drift apart.
@@ -20,7 +20,7 @@ Three things, all in SI units:
 
 ``(nFC_init, nCX_init)``
     the matching neutral initial guesses -- coupled three-equation
-    model only (:func:`build_neutral_initial_guess`).
+    state only (:func:`build_neutral_initial_guess`).
 
 Nothing else about the boundary is assumed or looked up downstream.
 
@@ -42,16 +42,19 @@ There are exactly **two** n_e boundary-condition pathways, selected by
     where the separatrix density and its gradient (their Eq. (20)) are
     the specified data and nothing is imposed at the pedestal top.
 
-The Dirichlet value is ``model.ne_x0`` in both pathways; only the
+The Dirichlet value is ``state.ne_x0`` in both pathways; only the
 *location of the Neumann condition* differs.
 
 Where the values come from
 ==========================
-Always from the kinetic profile the model holds, ``model.n_e`` (on
-``model.psi_ne_eval``), interpolated onto the solver's ``x_init`` grid at
-the moment the boundary conditions are resolved.  There is no
-``bc_origin`` switch and no way to pass boundary values in explicitly:
-to change the boundary conditions, change ``model.n_e``.
+By default, from the kinetic profile the state holds, ``state.n_e`` (on
+``state.psi_ne_eval``), interpolated onto the solver's ``x_init`` grid at
+the moment the boundary conditions are resolved.  Each value can instead
+be supplied explicitly -- ``dne_dx_bc`` (the Neumann value at the location
+``ne_bc_loc`` selects), ``ne_inner`` (the pedestal-top density for the
+initial guess) and ``dne_dx_neginf`` (the integration constant below) --
+in which case it is used as given; any left as None falls back to
+``state.n_e``.  The Dirichlet value is always ``state.ne_x0``.
 
 Only what was asked for is looked up
 ====================================
@@ -65,9 +68,9 @@ instead of silently using a number nobody asked for.
 
 Not a boundary condition
 ========================
-The original model's Eq. (6)/(7) source term carries Saarelma's constant
+The original state's Eq. (6)/(7) source term carries Saarelma's constant
 of integration ``C = dn_e/dx|_{x=-inf}``, which appears in the
-combination ``(dn_e/dx - dn_e/dx|_in)``.  That is a *model constant*
+combination ``(dn_e/dx - dn_e/dx|_in)``.  That is a *state constant*
 expressing "the edge neutrals are extinguished by the pedestal top", not
 a boundary condition, so it is resolved separately by
 :func:`resolve_integration_constant` and is unaffected by
@@ -92,8 +95,9 @@ __all__ = [
 #: The only two supported n_e boundary-condition pathways.
 NE_BC_LOCS = ("inner", "outer")
 
-#: Label recorded in ``NeBCs.origin`` / ``NeBCs.ne_inner_origin``.
-_PROFILE_ORIGIN = "model.n_e profile"
+#: Labels recorded in ``NeBCs.origin`` / ``NeBCs.ne_inner_origin``.
+_PROFILE_ORIGIN = "state.n_e profile"
+_USER_ORIGIN = "user-specified"
 
 
 @dataclass
@@ -180,55 +184,66 @@ def check_ne_bc_loc(ne_bc_loc):
     return loc
 
 
-def _ne_on_x_init(model):
-    """``model.n_e`` (m^-3, on ``model.psi_ne_eval``) interpolated onto the
-    solver grid ``model.x_init`` (via ``model.psi_N_pres``).
+def _ne_on_x_init(state):
+    """``state.n_e`` (m^-3, on ``state.psi_ne_eval``) interpolated onto the
+    solver grid ``state.x_init`` (via ``state.psi_N_pres``).
 
-    Re-interpolated on every call rather than reusing ``model.n_e_pres``,
-    so the boundary conditions always follow the current ``model.n_e``.
+    Re-interpolated on every call rather than reusing ``state.n_e_pres``,
+    so the boundary conditions always follow the current ``state.n_e``.
     """
-    return interp1d(model.psi_ne_eval, model.n_e, kind="linear",
+    return interp1d(state.psi_ne_eval, state.n_e, kind="linear",
                     bounds_error=False,
-                    fill_value="extrapolate")(model.psi_N_pres)
+                    fill_value="extrapolate")(state.psi_N_pres)
 
 
-def _profile_gradient_at(model, x_at):
-    """dn_e/dx (m^-4) read off ``model.n_e`` at SI ``x_at``."""
-    dne_dx = np.gradient(_ne_on_x_init(model), model.x_init)
-    return float(np.interp(x_at, model.x_init, dne_dx))
+def _profile_gradient_at(state, x_at):
+    """dn_e/dx (m^-4) read off ``state.n_e`` at SI ``x_at``."""
+    dne_dx = np.gradient(_ne_on_x_init(state), state.x_init)
+    return float(np.interp(x_at, state.x_init, dne_dx))
 
 
-def _profile_ne_inner(model, x_inner):
-    """n_e(x_inner) (m^-3) from ``model.n_e``, with the parent class's
+def _profile_ne_inner(state, x_inner):
+    """n_e(x_inner) (m^-3) from ``state.n_e``, with the parent class's
     manual-ne_x0 offset applied."""
-    ne_prof = _ne_on_x_init(model)
-    ne_inner_val = float(np.interp(x_inner, model.x_init, ne_prof))
-    if getattr(model, "ne_x0_manual", False):
+    ne_prof = _ne_on_x_init(state)
+    ne_inner_val = float(np.interp(x_inner, state.x_init, ne_prof))
+    if getattr(state, "ne_x0_manual", False):
         # Shift the whole profile so it meets the manually set separatrix
         # density (same convention as the original inline block).
-        ne_inner_val += (model.ne_x0
-                         - float(np.interp(0.0, model.x_init, ne_prof)))
+        ne_inner_val += (state.ne_x0
+                         - float(np.interp(0.0, state.x_init, ne_prof)))
     return ne_inner_val
 
 
-def resolve_ne_bcs(model, ne_bc_loc, require_negative_slope=False):
-    """Resolve the n_e boundary conditions for one solve from ``model.n_e``.
+def resolve_ne_bcs(state, ne_bc_loc, dne_dx_bc=None, ne_inner=None,
+                   require_negative_slope=False):
+    """Resolve the n_e boundary conditions for one solve.
 
-    Only the two conditions belonging to ``ne_bc_loc`` are looked up; the
-    gradient at the other end of the domain is never evaluated.
+    Explicit values are used when given; otherwise they are read off
+    ``state.n_e``.  Only the two conditions belonging to ``ne_bc_loc`` are
+    looked up; the gradient at the other end of the domain is never
+    evaluated.
 
     Parameters
     ----------
-    model : saarelma_connor
-        Solver instance.  ``model.n_e``, ``model.psi_ne_eval``,
-        ``model.psi_N_pres``, ``model.x_init``, ``model.ne_x0`` and
-        ``model.x_inner`` must already be set (i.e. call this after the
+    state : saarelma_connor
+        Solver instance.  ``state.n_e``, ``state.psi_ne_eval``,
+        ``state.psi_N_pres``, ``state.x_init``, ``state.ne_x0`` and
+        ``state.x_inner`` must already be set (i.e. call this after the
         equilibrium/profile setup and after ``find_inner_boundary``).
     ne_bc_loc : {"inner", "outer"}
         Boundary-condition pathway; see the module docstring.
+    dne_dx_bc : float, optional
+        Neumann value dn_e/dx (m^-4), imposed at x_inner for ``"inner"``
+        and at the separatrix for ``"outer"``.  None reads it off
+        ``state.n_e`` at that location.
+    ne_inner : float, optional
+        Pedestal-top density (m^-3) for the initial guess only.  None reads
+        it off ``state.n_e`` at x_inner.
     require_negative_slope : bool
-        Raise if the resolved slope is not strictly negative.  The
-        original-model solvers set this; the coupled solvers do not.
+        Raise if the resolved slope (user-specified or from the profile)
+        is not strictly negative.  The
+        original-state solvers set this; the coupled solvers do not.
 
     Returns
     -------
@@ -236,17 +251,22 @@ def resolve_ne_bcs(model, ne_bc_loc, require_negative_slope=False):
     """
     loc = check_ne_bc_loc(ne_bc_loc)
 
-    x_inner = float(model.x_inner)
+    x_inner = float(state.x_inner)
     if x_inner >= 0.0:
         raise ValueError(
             f"x_inner = {x_inner} must be strictly less than 0 (the "
             "separatrix)."
         )
-    ne_outer = float(model.ne_x0)          # Dirichlet, always at x = 0
+    ne_outer = float(state.ne_x0)          # Dirichlet, always at x = 0
 
     # ---- the Neumann value, read only where the pathway puts it -------
-    x_neumann = x_inner if loc == "inner" else 0.0
-    dne_dx_val = _profile_gradient_at(model, x_neumann)
+    if dne_dx_bc is not None:
+        dne_dx_val = float(dne_dx_bc)
+        origin = _USER_ORIGIN
+    else:
+        x_neumann = x_inner if loc == "inner" else 0.0
+        dne_dx_val = _profile_gradient_at(state, x_neumann)
+        origin = _PROFILE_ORIGIN
 
     if require_negative_slope and not dne_dx_val < 0.0:
         where = "x_inner" if loc == "inner" else "0"
@@ -257,23 +277,28 @@ def resolve_ne_bcs(model, ne_bc_loc, require_negative_slope=False):
         )
 
     # ---- pedestal-top density for the initial guess only --------------
-    ne_inner_guess = _profile_ne_inner(model, x_inner)
+    if ne_inner is not None:
+        ne_inner_guess = float(ne_inner)
+        ne_inner_origin = _USER_ORIGIN
+    else:
+        ne_inner_guess = _profile_ne_inner(state, x_inner)
+        ne_inner_origin = _PROFILE_ORIGIN
 
     # Kept for backwards compatibility with callers/notebooks that read
-    # these attributes off the model after a solve.
-    model.ne_inner = ne_inner_guess
+    # these attributes off the state after a solve.
+    state.ne_inner = ne_inner_guess
     if loc == "inner":
-        model.dne_dx_inner = dne_dx_val
-        model.dne_dx_neginf = dne_dx_val
+        state.dne_dx_inner = dne_dx_val
+        state.dne_dx_neginf = dne_dx_val
     else:
-        model.dne_dx_outer = dne_dx_val
+        state.dne_dx_outer = dne_dx_val
 
     return NeBCs(loc=loc, x_inner=x_inner, ne_outer=ne_outer,
                  dne_dx=dne_dx_val, ne_inner_guess=ne_inner_guess,
-                 origin=_PROFILE_ORIGIN, ne_inner_origin=_PROFILE_ORIGIN)
+                 origin=origin, ne_inner_origin=ne_inner_origin)
 
 
-def build_ne_initial_guess(model, x_grid, initial_guess, bcs,
+def build_ne_initial_guess(state, x_grid, initial_guess, bcs,
                            tanh_width=None, tanh_center=None):
     """SI electron-density initial guess (m^-3) on ``x_grid`` (m).
 
@@ -283,11 +308,11 @@ def build_ne_initial_guess(model, x_grid, initial_guess, bcs,
 
     Parameters
     ----------
-    model : saarelma_connor
+    state : class
         Used only by the profile-reading options.
     x_grid : array_like
         SI radial grid (m), 0 at the separatrix.  Need not be sorted.
-    initial_guess : {"pfile", "linear", "tanh", "manual EPEDNN loop"}
+    initial_guess : {"pfile", "linear", "tanh"}
     bcs : NeBCs
         From :func:`resolve_ne_bcs`.
     tanh_width, tanh_center : float or None
@@ -304,8 +329,9 @@ def build_ne_initial_guess(model, x_grid, initial_guess, bcs,
         xi = (x_grid - x_left) / (x_right - x_left)
         return ne_inner_val + (ne_outer_val - ne_inner_val) * xi
 
-    if initial_guess == "kprof":
-        return np.interp(x_grid, model.x_init, model.n_e_pres)
+    if initial_guess == "state":
+        psi_to_x = interp1d(state.psi_N_pres, state.x_init, kind='linear',bounds_error=False, fill_value='extrapolate')
+        return np.interp(x_grid, psi_to_x(state.psi_ne_eval), state.n_e)
 
     if initial_guess == "tanh":
         width = (float(tanh_width) if tanh_width is not None
@@ -316,37 +342,26 @@ def build_ne_initial_guess(model, x_grid, initial_guess, bcs,
         s_ne = 0.5 * (1.0 - np.tanh((x_grid - center) / (0.5 * width)))
         return ne_outer_val + (ne_inner_val - ne_outer_val) * s_ne
 
-    if initial_guess == "manual EPEDNN loop":
-        order_desc = np.argsort(x_grid)[::-1]
-        x_desc = x_grid[order_desc]
-        x_n_manual = np.interp(model.psi_N_n_manual, model.psi_N_pres,
-                               model.x_init)
-        ne_on_desc = np.interp(x_desc, x_n_manual, model.n_e_pfile)
-        ne_init = np.empty_like(x_grid)
-        ne_init[order_desc] = ne_on_desc
-        return ne_init
-
     raise ValueError(
-        f"Unknown initial_guess={initial_guess!r}; expected 'linear', "
-        "'pfile', 'tanh' or 'manual EPEDNN loop'."
+        f"Unknown initial_guess={initial_guess!r}."
     )
 
 
 
-def build_neutral_initial_guess(model, x_grid, ne_init,
+def build_neutral_initial_guess(state, x_grid, ne_init,
                                 nFC_ic="solve", nCX_ic="solve"):
     """SI neutral initial guesses ``(nFC_init, nCX_init)`` in m^-3 on
     ``x_grid`` (m), for a given electron-density guess ``ne_init``.
 
-    Shared by both discretisations of the coupled three-equation model
+    Shared by both discretisations of the coupled three-equation state
     (``solve_coupled_nondim`` and ``solve_coupled_nondim_scipy``) so the
     two cannot drift apart, exactly as
     :func:`build_ne_initial_guess` is shared for n_e.
 
     Parameters
     ----------
-    model : saarelma_connor
-        Supplies the frozen coefficient arrays on ``model.x_init`` and
+    state : saarelma_connor
+        Supplies the frozen coefficient arrays on ``state.x_init`` and
         the separatrix values ``nFC_x0`` / ``nCX_x0``.
     x_grid : array_like
         SI radial grid (m), 0 at the separatrix.  Need not be sorted;
@@ -354,25 +369,26 @@ def build_neutral_initial_guess(model, x_grid, ne_init,
     ne_init : array_like
         SI electron-density guess (m^-3) on ``x_grid``, e.g. from
         :func:`build_ne_initial_guess`.
-    nFC_ic : {"solve", "manual EPEDNN loop"}
+    nFC_ic : {"solve", "state"}
         ``"solve"``
             Integrate the FC neutral equation (Eq. (14) of Saarelma et
             al. 2023) analytically at the frozen ``ne_init``.  With
             n_e fixed the equation is exactly homogeneous and linear in
             u = f_FC n_FC, so an integrating factor gives it in closed
             form.
-        ``"manual EPEDNN loop"``
-            Interpolate the tabulated ``model.nFC_manual`` (given on
-            ``model.psi_N_n_manual``) onto ``x_grid``.
-    nCX_ic : {"solve", "scale nFC", "manual EPEDNN loop"}
+        ``"state"``
+            Interpolate the previous Saarelma-Connor solution
+            ``state.nFC`` (given on ``state.psi_nFC_eval``, set by
+            ``ESCAPE_solve``) onto ``x_grid``.
+    nCX_ic : {"solve", "scale nFC", "state"}
         ``"solve"``
             Integrate the CX neutral equation (Eq. (10)) analytically at
             the frozen ``ne_init`` *and* the FC guess just built,
             keeping the FC source term.
         ``"scale nFC"``
             ``nCX_init = nFC_init * nCX_x0 / nFC_x0``.
-        ``"manual EPEDNN loop"``
-            As above, from ``model.nCX_manual``.
+        ``"state"``
+            As above, from ``state.nCX`` on ``state.psi_nCX_eval``.
 
     Notes
     -----
@@ -389,18 +405,30 @@ def build_neutral_initial_guess(model, x_grid, ne_init,
     order_desc = np.argsort(x_grid)[::-1]
     x_desc = x_grid[order_desc]
     ne_desc = ne_init[order_desc]                                   # m^-3
-    Si_desc = np.interp(x_desc, model.x_init, model.S_i_pres)
-    Scx_desc = np.interp(x_desc, model.x_init, model.S_cx_pres)
-    fFC_desc = np.interp(x_desc, model.x_init, model.fFC)
-    fCX_desc = np.interp(x_desc, model.x_init, model.fCX)
-    g_desc = np.interp(x_desc, model.x_init, model.gradr2_fsa)
-    Vcx_desc = np.interp(x_desc, model.x_init, np.abs(model.V_cx_pres))  # m/s
+    Si_desc = np.interp(x_desc, state.x_init, state.S_i_pres)
+    Scx_desc = np.interp(x_desc, state.x_init, state.S_cx_pres)
+    fFC_desc = np.interp(x_desc, state.x_init, state.fFC)
+    fCX_desc = np.interp(x_desc, state.x_init, state.fCX)
+    g_desc = np.interp(x_desc, state.x_init, state.gradr2_fsa)
+    Vcx_desc = np.interp(x_desc, state.x_init, np.abs(state.V_cx_pres))  # m/s
 
-    def _manual_on_desc(manual_arr):
-        """Interpolate a psi_N-tabulated manual profile onto x_desc."""
-        x_n_manual = np.interp(model.psi_N_n_manual, model.psi_N_pres,
-                               model.x_init)
-        return np.interp(x_desc, x_n_manual, manual_arr)
+    def _state_on_desc(name, psi_name):
+        """Interpolate the psi_N-tabulated state profile ``state.<name>``
+        (on ``state.<psi_name>``) onto x_desc."""
+        vals = np.asarray(getattr(state, name, []), dtype=float)
+        psi_n = np.asarray(getattr(state, psi_name, []), dtype=float)
+        if vals.size == 0 or vals.size != psi_n.size:
+            raise ValueError(
+                f"state.{name} (size {vals.size}) / state.{psi_name} "
+                f"(size {psi_n.size}) are empty or mismatched; the 'state' "
+                "neutral initial guess needs a previous Saarelma-Connor "
+                "solve (see ESCAPE_solve)."
+            )
+        psi_to_x = interp1d(state.psi_N_pres, state.x_init, kind='linear',
+                            bounds_error=False, fill_value='extrapolate')
+        x_n = psi_to_x(psi_n)
+        order = np.argsort(x_n)   # np.interp needs ascending abscissae
+        return np.interp(x_desc, x_n[order], vals[order])
 
     def _scatter(vals_desc):
         out = np.empty_like(x_grid)
@@ -414,20 +442,20 @@ def build_neutral_initial_guess(model, x_grid, ne_init,
         # homogeneous in u = f_FC n_FC, so the integrating factor from
         # the separatrix gives n_FC in closed form.
         integrand_init = (
-            ne_desc * (Si_desc + Scx_desc) / (fFC_desc * abs(model.V_FC))
+            ne_desc * (Si_desc + Scx_desc) / (fFC_desc * abs(state.V_FC))
         )
         cumint_desc = cumulative_trapezoid(integrand_init, x_desc, initial=0.0)
-        nFC_on_desc = model.nFC_x0 * np.exp(cumint_desc)
-    elif nFC_ic == "manual EPEDNN loop":
+        nFC_on_desc = state.nFC_x0 * np.exp(cumint_desc)
+    elif nFC_ic == "state":
         # Previous-iteration FE solutions undershoot to tiny negatives in
         # the core where n_FC has decayed away; floor them at a small
         # positive fraction of the separatrix value rather than reject.
-        nFC_on_desc = np.clip(_manual_on_desc(model.nFC_manual),
-                              1e-15 * model.nFC_x0, None)
+        nFC_on_desc = np.clip(_state_on_desc('nFC', 'psi_nFC_eval'),
+                              1e-15 * state.nFC_x0, None)
     else:
         raise ValueError(
             f"Unknown nFC_ic={nFC_ic!r}; expected 'solve' or "
-            "'manual EPEDNN loop'."
+            "'state'."
         )
 
     nFC_init = _scatter(nFC_on_desc)
@@ -461,29 +489,31 @@ def build_neutral_initial_guess(model, x_grid, ne_init,
         nu_desc = np.exp(int_P)
         nu_Q_int = cumulative_trapezoid(nu_desc * Q_desc, tau_desc, initial=0.0)
 
-        u_desc_0 = fCX_desc[0] * g_desc[0] * model.nCX_x0
+        u_desc_0 = fCX_desc[0] * g_desc[0] * state.nCX_x0
         u_desc = (u_desc_0 + nu_Q_int) / nu_desc
 
         nCX_init = _scatter(u_desc / (fCX_desc * g_desc))
     elif nCX_ic == "scale nFC":
-        nCX_init = nFC_init * model.nCX_x0 / model.nFC_x0
-    elif nCX_ic == "manual EPEDNN loop":
+        nCX_init = nFC_init * state.nCX_x0 / state.nFC_x0
+    elif nCX_ic == "state":
         # Same floor as the manual n_FC branch, relative to nCX_x0.
-        nCX_init = _scatter(np.clip(_manual_on_desc(model.nCX_manual),
-                                    1e-15 * model.nCX_x0, None))
+        nCX_init = _scatter(np.clip(_state_on_desc('nCX', 'psi_nCX_eval'),
+                                    1e-15 * state.nCX_x0, None))
     else:
         raise ValueError(
-            f"Unknown nCX_ic={nCX_ic!r}; expected 'solve', 'scale nFC' or "
-            "'manual EPEDNN loop'."
+            f"Unknown nCX_ic={nCX_ic!r}."
         )
 
     return nFC_init, nCX_init
 
 
-def resolve_integration_constant(model):
+def resolve_integration_constant(state, dne_dx_neginf=None):
     """Saarelma's constant of integration C = dn_e/dx|_{x=-inf} (m^-4).
 
-    **Not a boundary condition.**  In the original model this is the
+    ``dne_dx_neginf`` is used as given when not None; otherwise C is read
+    off ``state.n_e`` at the pedestal top.
+
+    **Not a boundary condition.**  In the original state this is the
     particle flux left over where the edge-neutral ionisation source has
     died out; it enters Eqs. (6)/(7) only through the combination
     ``(dn_e/dx - dn_e/dx|_in)``, which is the accumulated source between
@@ -491,12 +521,15 @@ def resolve_integration_constant(model):
     gradient at the pedestal top, which is legitimate exactly when the
     neutrals really are extinguished there.
 
-    Because it is a model constant rather than a boundary condition it is
+    Because it is a state constant rather than a boundary condition it is
     resolved independently of ``ne_bc_loc`` -- an ``"outer"`` solve still
-    needs it, and it still comes from the pedestal top of ``model.n_e``.
+    needs it, and it still comes from the pedestal top of ``state.n_e``.
     """
-    val = _profile_gradient_at(model, float(model.x_inner))
-    model.dne_dx_neginf = val
+    if dne_dx_neginf is not None:
+        val = float(dne_dx_neginf)
+    else:
+        val = _profile_gradient_at(state, float(state.x_inner))
+    state.dne_dx_neginf = val
     return val
 
 

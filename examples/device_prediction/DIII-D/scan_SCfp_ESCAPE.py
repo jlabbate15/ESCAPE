@@ -1,45 +1,45 @@
 import os
-import matplotlib.pyplot as plt
 import numpy as np
 import sys
 from pathlib import Path
-import tempfile
-import urllib.request # needed for geqdsk import
+import pickle # to check which state attributes np.save can store
 import netCDF4 as nc # OMFIT profile files are netCDF
 ROOT = Path.cwd().parent.parent.parent
 sys.path.insert(0, str(ROOT))
-from src.profiles_loop_solve import profiles_loop_solve
-from ESCAPE.helpers.load_equil import initialize_inputs
-
-tokamaker_python_path = os.getenv('OFT_ROOTPATH')
-if tokamaker_python_path is not None:
-    sys.path.append(os.path.join(tokamaker_python_path,'python'))
-from OpenFUSIONToolkit import OFT_env
-from OpenFUSIONToolkit.TokaMaker import TokaMaker
-from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
-from OpenFUSIONToolkit.TokaMaker.util import create_isoflux, read_eqdsk
-
-from examples.device_prediction.helper_functions import read_sparcpublic_profiles, psi_n_and_rho_psi, build_manual_profs, calc_pressure_profile, _print_profile_summary, read_popcon, _to_watts
+from src.ESCAPE.ESCAPE_solve import ESCAPE_solve
+from helpers.load_equil import initialize_inputs
+from helpers.parse_equil import mhd_load
+from helpers.parse_prof import kprof_load
+from examples.device_prediction.helper_functions import calc_pressure_profile
 
 
-equil_num = None # None for all
-# equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
+# ---------------------- COMMON USER INPUTS ----------------------
+equil_num = 4 # None for all
+equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
 equil_list = None
-output_dir = f'DIIIDSnyder_ESCAPE_noKBM_ETG05_pwfix_outer'
+output_dir = f'DIIIDSnyder_ESCAPE_test'
+
+alpha_crits = np.array([0.01])
+nFC_x0s = np.array([1e15])
+C_KBMs = np.array([0.0])
+De_chie_etgs = np.array([0.5])
+ncx_x0_ratios = np.array([15])
+# ----------------------------------------------------------------
+
+
 Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-
 
 # Equilibria parameters
 geqdsk_dir = Path('/mnt/homes_global/jal2351/software/sc_inputs/gHighPerfHMode')
 pfile_dir = Path('/mnt/homes_global/jal2351/software/sc_inputs/OMFITnc_HighPerfHMode')
+mhd_loc = 'eqdsk'
 kprof_loc = 'OMFITnc'
 equil_num_total = len(list(pfile_dir.glob('*.cdf')))
 if equil_num is None:
     equil_num = equil_num_total
 print(f'Number of equilibria found: {equil_num_total}')
 print(f'Number of equilibria to process: {equil_num}')
-equilibria = initialize_inputs(equil_num, geqdsk_dir, pfile_dir, p_filetype='OMFITnc',select_equil=equil_list) # Load in equilibria
+equilibria = initialize_inputs(equil_num, geqdsk_dir, pfile_dir, p_filetype=kprof_loc, select_equil=equil_list) # (g-file, IDA .cdf) path pairs
 
 
 # ── Heating power ────────────────────────────────────────────────────────────
@@ -78,97 +78,132 @@ def read_omfitnc_zeff(kprof_fp, psi_eval=ZEFF_PSI_N, default=ZEFF_DEFAULT):
     return float(np.interp(psi_eval, psi[good], z_t[good]))
 
 
-def read_omfitnc_profiles(kprof_fp):
-    """Input kinetic profiles from an OMFIT IDA netCDF, time-averaged, in the
-    layout calc_pressure_profile expects (psi_N_ne/psi_N_Te + SI ne + keV Te).
+def load_equilibrium(mhd_fp, kprof_fp):
+    """Build the ESCAPE_state inputs for one (g-file, IDA netCDF) pair.
 
-    This is the DIII-D analogue of the SPARC `manual_profs`: it is what the
-    solver is fed, so the experimental pedestal pressure is computed from the
-    same profiles the model saw. The IDA files carry no main-ion temperature or
-    density (only the carbon channels, which are not the main ions), so Ti and
-    ni are left out and calc_pressure_profile takes Ti = Te, ni = ne, i.e.
-    p = 2*ne*Te.
+    Returns
+    -------
+    equil_params : dict
+        read_eqdsk dictionary of the g-file (psirz, fpol, pres, ip, rzout, ...),
+        which is what ESCAPE_state.set_equil_params consumes.
+    kprof_params : dict
+        T_e [keV] / n_e [m^-3] on their psi_N grids from kprof_load. The IDA
+        files carry no main-ion channels (only carbon), so n_i = n_e is set
+        explicitly here (quasi-neutrality) and T_i is left out so that
+        ESCAPE_state takes T_i = T_rat * T_e.
     """
-    with nc.Dataset(kprof_fp) as f:
-        psi = np.asarray(f.variables['psi_n'][:], dtype=float)
+    equil_params = mhd_load(None, mhd_loc, mhd_fp)
+    kprof_params = kprof_load(kprof_loc=kprof_loc, kprof_fp=kprof_fp)
+    kprof_params['n_i'] = kprof_params['n_e'].copy()          # m^-3
+    kprof_params['psin_ni'] = kprof_params['psin_ne'].copy()
+    return equil_params, kprof_params
 
-        def _avg(name):
-            if name not in f.variables:
-                return None, ''
-            var = f.variables[name]
-            a = np.ma.filled(var[:], np.nan).astype(float)
-            if a.ndim > 1:                      # average over the time axis
-                a = np.nanmean(a, axis=0)
-            return a, str(getattr(var, 'unit', '')).lower()
 
-        ne, ne_unit = _avg('n_e')
-        Te, Te_unit = _avg('T_e')
-
-    if ne is None or Te is None:
-        raise KeyError(f'{Path(kprof_fp).name} has no n_e/T_e')
-
-    # IDA files store T in eV and n_e in m^-3; convert T to keV like the solver.
-    def _to_keV(t, unit):
-        if t is None:
-            return None
-        if unit in ('ev', 'electron volt', 'electron-volt'):
-            return t / 1e3
-        if unit in ('kev',):
-            return t
-        return t / 1e3 if np.nanmax(np.abs(t)) > 100 else t
-
-    Te = _to_keV(Te, Te_unit)
-    if ne_unit in ('10^19/m^3', '10^19 m^-3'):
-        ne = ne * 1e19
-    elif ne_unit in ('10^20/m^3', '10^20 m^-3'):
-        ne = ne * 1e20
-
-    # Drop points where any needed channel is NaN, keep the grid monotonic.
-    good = np.isfinite(psi) & np.isfinite(ne) & np.isfinite(Te)
-    if not good.any():
-        raise ValueError(f'{Path(kprof_fp).name} has no finite ne/Te points')
-
-    profiles = {
-        'psi_N_ne': psi[good],
-        'ne': ne[good],            # m^-3
-        'psi_N_Te': psi[good],
-        'Te': Te[good],            # keV
+def kprof_to_profiles(kprof_params):
+    """kprof_params -> the layout calc_pressure_profile expects, so the
+    experimental pedestal pressure comes from the same profiles ESCAPE is fed.
+    With no Ti/ni keys, calc_pressure_profile uses p = 2*ne*Te."""
+    return {
+        'psi_N_ne': kprof_params['psin_ne'],
+        'ne': kprof_params['n_e'],            # m^-3
+        'psi_N_Te': kprof_params['psin_Te'],
+        'Te': kprof_params['T_e'],            # keV
         'units': {'ne': 'm^-3', 'Te': 'keV'},
     }
-    return profiles
 
 
+def state_to_dict(state):
+    """Picklable snapshot of an ESCAPE state's attributes, for np.save.
+
+    The state object itself can't be pickled: it holds the juliacall EPEDNN
+    model and (after a Firedrake solve) Firedrake meshes/Functions. Those
+    attributes are left out and their names recorded under '_not_saved'.
+    """
+    saved, not_saved = {}, []
+    for name, val in vars(state).items():
+        try:
+            pickle.dumps(val)
+        except Exception:
+            not_saved.append(name)
+        else:
+            saved[name] = val
+    saved['_not_saved'] = not_saved
+    return saved
 
 
-# Scan parameters
-x_res = 50
-solver_structure = "firedrake"
-epednn_model = 'EPED1' # 'EPED1' or 'EPED_SPARC'
-EPEDNN_core = 'stiff T_e and n_e'
-eped_tol_max = 1e-5
-eped_iter_max = 200
-kbm_treatment = "picard"
-kbm_gate_eps = 0.1
-picard_gate_mode = "average"
-picard_max_it = 50
-picard_rtol = 1e-8
-picard_relax = 1.0
-ne_grad_bc_loc = "outer"
-verbose_EPEDNNloop = False
-verbose_sc = False
+# ESCAPE parameters
+ESCAPE_tol_max = 1e-5
+ESCAPE_iter_max = 200
+out_dir = output_dir
+ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
+quasineutral_flag = True
+T_rat_flag = True # True if using a temperature ratio between ions and electrons, False if doing something else
+T_rat = 1
+pol_norm = False # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
+species = 'D' # species of ions, currently supporting: D, D-T
+regime_flag = 'PT H-mode' # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
+verbose_ESCAPE = False
+
+# Saarelma-Connor initialization parameters
+sc_params = {
+    'psi_N_inner_boundary': 0.85, # normalized poloidal flux at the inner boundary (boundary condition); overridden by find_inner_boundary if nFC_threshold or nCX_threshold is set
+    'nFC_threshold': None, # fraction of nFC at the separatrix below which the inner boundary is placed (None to disable)
+    'nCX_threshold': None, # fraction of nCX at the separatrix below which the inner boundary is placed (None to disable)
+    'x_method': 'radas', # method to use for the cross-section rates, currently supporting: 'adas', 'radas'
+    'verbose': False,
+    'model': '3D',
+    'implementation': 'firedrake',
+}
+
+# Saarelma-Connor (SC) shared solver parameters
+sc_params.update({
+    'x_res':40,
+    'ne_grad_bc_loc':"inner",
+    'picard_max_it':50,
+    'picard_rtol':1e-6,
+    'picard_relax':1.0,
+    'reuse_setup':False,
+})
+
+# SC scipy specific
+sc_params.update({
+    'bvp_tol':1e-6,
+    'bvp_max_nodes':5000,
+})
+
+# SC firedrake specific
+sc_params.update({
+    'fe_degree':2, # firedrake specific
+    'grad_bc_tol':1e-8,
+    'grad_bc_max_it':25,
+    'grad_bc_seed':None,
+    'linear_solver':"lu",
+    'ksp_rtol':1e-8,
+    'ksp_max_it':200,
+})
+
+# SC 3D specific
+sc_params.update({
+    'nCX_ic':"scale nFC", # 'scale nFC' or 'solve' or 'state'
+    'nFC_ic':"solve",
+    'neutrals_treatment':"fem", # only for firedrake (FEM)
+    'n_neutral_sub':4001, # only for firedrake (FEM)
+})
+
+# SC 1D specific
+sc_params.update({
+    'eq6_form':"complete",
+    'first_step':"auto",
+})
+
+# EPEDNN parameters
+epednn_params = {
+    'epednn_model': 'EPED1', # 'EPED1' or 'EPED_SPARC'
+    'pres_gfile': False, # use pressure from kprofs
+}
+
 
 import itertools
-
-# alpha_crits = np.array([0.01,10])
-# nFC_x0s = np.append(np.logspace(14.7, 16, 3), 1e14)
-# C_KBMs = np.array([0.3,1.0])
-# De_chie_etgs = np.array([0.1,0.5])
-# ncx_x0_ratios = np.array([0.01,0.5])
-alpha_crits = np.array([0.01])
-nFC_x0s = np.array([1e15])
-C_KBMs = np.array([0.0])
-De_chie_etgs = np.array([0.5])
-ncx_x0_ratios = np.array([15])
 
 # ne_x0s = [None, 1e20, 2e20] # m^-3, manually specify outer bc for electron density
 ne_x0s = [None] # m^-3, manually specify outer bc for electron density
@@ -182,20 +217,22 @@ for mhd_fp, kprof_fp in equilibria:
     out_path.mkdir(parents=True, exist_ok=True)
 
     # Zeff is a profile in the OMFIT netCDF, so take it per equilibrium.
-    Zeff = read_omfitnc_zeff(kprof_fp)  # dimensionless, at psi_N = ZEFF_PSI_N
+    Z_eff = read_omfitnc_zeff(kprof_fp)  # dimensionless, at psi_N = ZEFF_PSI_N
+    Z_i = 1
 
-    # Input profiles the solver is fed, kept so out_dict['profiles'] and the
-    # experimental pedestal pressure both come from the same source.
-    profiles = read_omfitnc_profiles(kprof_fp)
+    # ESCAPE_state inputs, plus the same profiles in calc_pressure_profile form
+    # so out_dict['profiles'] and the experimental pedestal pressure match them.
+    equil_params, kprof_params = load_equilibrium(mhd_fp, kprof_fp)
+    profiles = kprof_to_profiles(kprof_params)
     psi_N_p, p_Pa, p_mode = calc_pressure_profile(profiles)
 
     # P_tot_e: heating power to electrons [W]. No per-shot power in the inputs,
     # so apply the set-representative estimate (see P_HEAT_TOT above).
     P_tot_e = P_HEAT_TOT * ELECTRON_FRAC
 
-    print(f'{equil_tag}: Zeff = {Zeff:.3f}, P_tot_e = {P_tot_e/1e6:.2f} MW, pressure: {p_mode}')
+    print(f'{equil_tag}: Z_eff = {Z_eff:.3f}, P_tot_e = {P_tot_e/1e6:.2f} MW, pressure: {p_mode}')
 
-    out_dir_ref = Path(out_path)
+    out_dir_ref = Path(out_path) # out_dir / equil_num
 
     j=0
     for ne_x0 in ne_x0s:
@@ -208,64 +245,64 @@ for mhd_fp, kprof_fp in equilibria:
                 'nFC_x0': combo[3],
                 'ncx_x0_ratio': combo[4]
             }
+            sc_params['free_params'] = free_params
 
-            out_dir = out_dir_ref / Path(f'neouter{j}_fp{i}')
+            out_dir = out_dir_ref / Path(f'neouter{j}_fp{i}') # out_dir / equil_num / neouterj_fpi
             out_dir.mkdir(parents=True, exist_ok=True)
 
 
-            try:
-                ped_wid, ped_h_out, sol = profiles_loop_solve(
-                    MHD_FP = mhd_fp,
-                    KPROF_FP = kprof_fp,
-                    kprof_loc = 'OMFITnc',
-                    P_tot_e = P_tot_e,
-                    species = 'D',
-                    Z_i = Zeff,
-                    out_dir = out_dir,
-                    x_res = x_res,
-                    solver_structure = solver_structure,
-                    ne_x0 = ne_x0,
-                    ne_grad_bc_loc = ne_grad_bc_loc,
-                    free_params = free_params,
-                    eped_tol_max = eped_tol_max,
-                    eped_iter_max = eped_iter_max,
-                    kbm_gate_eps = kbm_gate_eps,
-                    kbm_treatment = kbm_treatment,
-                    picard_gate_mode = picard_gate_mode,
-                    picard_max_it = picard_max_it,
-                    picard_rtol = picard_rtol,
-                    picard_relax = picard_relax,
-                    ig = 'manual',
-                    epednn_model = epednn_model,
-                    EPEDNN_core = EPEDNN_core, 
-                    verbose = verbose_EPEDNNloop,
-                    verbose_sc = verbose_sc,
-                )
+            # try:
+            state = ESCAPE_solve(
+                sc_params,
+                epednn_params,
+                Z_i = Z_i, # Z of ions
+                Z_eff = Z_eff, 
+                P_tot_e = P_tot_e, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
+                ne_x0 = ne_x0, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
+                equil_params = equil_params, # dictionary of required equilibrium parameters
+                kprof_params = kprof_params, # dictionary of required kinetic profile (density, temperature) parameters
+                quasineutral_flag = quasineutral_flag,
+                T_rat_flag = T_rat_flag, # True if using a temperature ratio between ions and electrons, False if doing something else
+                T_rat = T_rat,
+                pol_norm = pol_norm, # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
+                species = species, # species of ions, currently supporting: D, D-T
+                regime_flag = regime_flag, # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
+                ESCAPE_iter_max = ESCAPE_iter_max, 
+                ESCAPE_tol_max = ESCAPE_tol_max,
+                out_dir = out_dir, # directory to output files
+                verbose = verbose_ESCAPE,
+            )
 
-                # Experimental pedestal pressure at psi_N = 1 - ped_wid, from the
-                # input profiles (psi_N_p / p_Pa built once per equilibrium above).
-                psi_ped_top = 1.0 - float(ped_wid)
-                p_at_ped_top = float(np.interp(psi_ped_top, psi_N_p, p_Pa))
+            # ESCAPE pedestal from the final EPEDNN call on the returned state
+            ped_wid = state.pedestal_width      # normalized poloidal flux
+            # EPED1 returns MPa (as ESCAPE_solve assumes); convert to Pa to
+            # match the experimental p_Pa below
+            ped_h_out = state.pedestal_pressure * 1e6 # Pa
 
-                # Save model output
-                out_dict = {
-                    'mhd_fp': mhd_fp,
-                    'kprof_fp': kprof_fp,
-                    'profiles': profiles,
-                    'ESCAPE_ped_h': ped_h_out,
-                    'ESCAPE_ped_wid': ped_wid,
-                    'experimental_ped_h': p_at_ped_top,
-                    'free_params': free_params,
-                    'profiles_solved': sol, # profiles
-                    'p_mode': p_mode,
-                    'Zeff': Zeff,
-                    'P_tot_e': P_tot_e,
-                    'i': i,
-                }
-                np.save(out_dir / 'out_dict.npy', out_dict)
-            except Exception as e:
-                out_dict = {'failed': True, 'free_params': free_params, 'error': str(e)}
-                np.save(out_dir / 'failed.npy', out_dict)
+            # Experimental pedestal pressure at psi_N = 1 - ped_wid, from the
+            # input profiles (psi_N_p / p_Pa built once per equilibrium above).
+            psi_ped_top = 1.0 - float(ped_wid)
+            p_at_ped_top = float(np.interp(psi_ped_top, psi_N_p, p_Pa))
+
+            # Save model output
+            out_dict = {
+                'mhd_fp': mhd_fp,
+                'kprof_fp': kprof_fp,
+                'profiles': profiles,
+                'ESCAPE_ped_h': ped_h_out, # Pa
+                'ESCAPE_ped_wid': ped_wid,
+                'experimental_ped_h': p_at_ped_top, # Pa
+                'free_params': free_params,
+                'p_mode': p_mode,
+                'Zeff': Z_eff,
+                'P_tot_e': P_tot_e,
+                'i': i,
+                'state': state_to_dict(state), # picklable ESCAPE state attributes
+            }
+            np.save(out_dir / 'out_dict.npy', out_dict)
+            # except Exception as e:
+            #     out_dict = {'failed': True, 'free_params': free_params, 'error': str(e)}
+            #     np.save(out_dir / 'failed.npy', out_dict)
 
             if i%50 == 0:
                 print(f'Scan {i} of {scan_total} completed')

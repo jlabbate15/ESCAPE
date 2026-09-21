@@ -8,25 +8,13 @@ import os
 class epednn_class:
     """Mixin adding the EPEDNN methods
     """
-    def calc_volavgP(self,x_ne=None,ne_pedestal=None,psiN_Te=None,Te_prev=None,EPEDNN_core='pfile',pres_gfile=False):
+    def calc_volavgP(self,pres_gfile=False):
         """Calculate the volume-averaged pressure
 
         Parameters
         ----------
         self : object
             instance of saarelma_connor class
-        x_ne : array
-            x values at which the ne model is evaluated (ne is only in pedestal)
-        ne_pedestal : array
-            pedestal density profile in m^-3
-        psiN_Te : array
-            psi_N values at which the Te model is evaluated (Te is for the full plasma)
-        Te_prev : array
-            previous temperature profile in eV
-        EPEDNN_core : string
-            'pfile' 
-            'pfile T, stiched ne'
-            'previous T, stiched ne'
         pres_gfile : boolean
             if True, use the pressure from the g-file
 
@@ -36,107 +24,24 @@ class epednn_class:
             Volume-averaged pressure (same units as self.pres).
         """
 
+        psi_N_plasma = self.psi_N_pres
         if pres_gfile: 
             pressure = self.eq['pres'][1:]
-            psi_N_plasma = self.psi_N_pres
         else:
-            if EPEDNN_core == 'pfile': # always fixed to p-file n_e and T_e
-                psi_N_plasma = self.psi_N_pres
-                n_e_plasma = interp1d(self.psi_N_pres, self.n_e_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma)
-                T_tot_plasma = interp1d(self.psi_N_pres, self.T_e_pres + self.T_i_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma)
+            n_i_pres = interp1d(self.psi_ni_eval,self.n_i, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma)
+            n_e_pres = interp1d(self.psi_ne_eval,self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma)
+            T_i_pres = interp1d(self.psi_Ti_eval,self.T_i, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma) * 1e3 # keV -> eV
+            T_e_pres = interp1d(self.psi_Te_eval,self.T_e, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma) * 1e3 # keV -> eV
 
-            elif EPEDNN_core == 'pfile T, stiched ne': # pfile T_e and stiched n_e
-                # Calculate core n_e
-                psi_N_core = np.linspace(0, self.psi_N_inner_boundary, 75)
-                n_e_core = interp1d(self.psi_ne_eval, self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_core)
-                
-                # Calculate total n_e and T_e
-                # psi_N_ped = interp1d(self.x_init, self.psi_N_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(self.x_dofs_si)
-                psi_N_ped = interp1d(self.x_init, self.psi_N_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(x_ne)
-                psi_N_plasma = np.concatenate([psi_N_core, psi_N_ped])
-                n_e_plasma = np.concatenate([n_e_core, ne_pedestal])
+            pressure = (n_i_pres * T_i_pres + n_e_pres * T_e_pres) * constants.e # Pa
 
-                # x_dofs_si is in Firedrake DOF order (not spatial); sort to psi_N
-                # before np.gradient (same issue as dpdx in update_alpha).
-                sort_idx = np.argsort(psi_N_plasma)
-                psi_N_plasma = psi_N_plasma[sort_idx]
-                n_e_plasma = n_e_plasma[sort_idx]
-                _, uniq_idx = np.unique(psi_N_plasma, return_index=True)
-                psi_N_plasma = psi_N_plasma[uniq_idx]
-                n_e_plasma = n_e_plasma[uniq_idx]
-
-                T_tot_plasma = interp1d(self.psi_N_pres, self.T_e_pres + self.T_i_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma)
-
-            elif EPEDNN_core == 'previous T, stiched ne': # previous T_e and stiched n_e
-                # Calculate core n_e
-                psi_N_core = np.linspace(0, self.psi_N_inner_boundary, 75)
-                n_e_core = interp1d(self.psi_ne_eval, self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_core)
-                
-                # Calculate total n_e and T_e
-                # psi_N_ped = interp1d(self.x_init, self.psi_N_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(self.x_dofs_si)
-                psi_N_ped = interp1d(self.x_init, self.psi_N_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(x_ne)
-                psi_N_plasma = np.concatenate([psi_N_core, psi_N_ped])
-                n_e_plasma = np.concatenate([n_e_core, ne_pedestal])
-
-                # x_dofs_si is in Firedrake DOF order (not spatial); sort to psi_N
-                # before np.gradient (same issue as dpdx in update_alpha).
-                sort_idx = np.argsort(psi_N_plasma)
-                psi_N_plasma = psi_N_plasma[sort_idx]
-                n_e_plasma = n_e_plasma[sort_idx]
-                _, uniq_idx = np.unique(psi_N_plasma, return_index=True)
-                psi_N_plasma = psi_N_plasma[uniq_idx]
-                n_e_plasma = n_e_plasma[uniq_idx]
-
-                if self.T_rat_flag:
-                    Ti_prev = Te_prev * self.T_rat
-                else:
-                    raise ValueError('T_rat_flag must be True if T_rat is provided')
-                T_tot_plasma = interp1d(psiN_Te, Te_prev + Ti_prev, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma)
-
-            elif EPEDNN_core == 'stiff T_e and n_e': # previous T_e and n_e core stiff with pedestal
-                # Calculate core n_e
-                psi_N_core = np.linspace(0, self.psi_N_inner_boundary, 75)
-                _n_e_core = interp1d(self.psi_ne_eval, self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_core)
-                n_e_core_at_ped = interp1d(self.psi_ne_eval, self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(self.psi_N_inner_boundary)
-                ne_ped_at_top = interp1d(x_ne, ne_pedestal, kind='linear', bounds_error=False, fill_value='extrapolate')(self.x_inner)
-                delta = ne_ped_at_top - n_e_core_at_ped
-                n_e_core = _n_e_core + delta # push core up stiffly to match pedestal top
-                
-                # Calculate total n_e and T_e
-                psi_N_ped = interp1d(self.x_init, self.psi_N_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(x_ne)
-                psi_N_plasma = np.concatenate([psi_N_core, psi_N_ped])
-                n_e_plasma = np.concatenate([n_e_core, ne_pedestal])
-
-                # x_dofs_si is in Firedrake DOF order (not spatial); sort to psi_N
-                # before np.gradient (same issue as dpdx in update_alpha).
-                sort_idx = np.argsort(psi_N_plasma)
-                psi_N_plasma = psi_N_plasma[sort_idx]
-                n_e_plasma = n_e_plasma[sort_idx]
-                _, uniq_idx = np.unique(psi_N_plasma, return_index=True)
-                psi_N_plasma = psi_N_plasma[uniq_idx]
-                n_e_plasma = n_e_plasma[uniq_idx]
-
-                if self.T_rat_flag:
-                    Ti_prev = Te_prev * self.T_rat
-                else:
-                    raise ValueError('T_rat_flag must be True if T_rat is provided')
-                T_tot_plasma = interp1d(psiN_Te, Te_prev + Ti_prev, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma)
-
-            elif EPEDNN_core == 'previous T, varying ne': # stiched T_e and varyped outputted n_e
-                raise NotImplementedError('previous T, varying ne is not yet implemented')
-
-            else:
-                assert False, 'EPEDNN_betan method not supported'
-
-            pressure = (n_e_plasma * T_tot_plasma) * constants.e # Pa
-
-        # Calculate pressure and volavgP
+        # Volume average the pressure
         V_full_plasma = interp1d(self.psi_N_pres, self.V_plasma, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_plasma)
         dV_dpsi = np.gradient(V_full_plasma, psi_N_plasma)
         self.volavgP = (simpson(pressure * dV_dpsi, psi_N_plasma)
                         / simpson(dV_dpsi, psi_N_plasma))
                 
-    def calc_betan(self,x_ne=None,ne_pedestal=None,psiN_Te=None,Te_prev=None,EPEDNN_core='pfile',pres_gfile=False):
+    def calc_betan(self,pres_gfile=False):
         """Calculate the normalized beta
 
         Parameters
@@ -150,10 +55,10 @@ class epednn_class:
             Normalized beta, dimensionless
         """
 
-        self.calc_volavgP(x_ne,ne_pedestal,psiN_Te,Te_prev,EPEDNN_core,pres_gfile)
+        self.calc_volavgP(pres_gfile)
 
-        _, [B_R, B_Z, _] = self.calc_B(self.eq['rzout'][:, 0], self.eq['rzout'][:, 1])
-        bp_lcfs = np.sqrt(B_R**2 + B_Z**2)
+        # _, [B_R, B_Z, _] = xself.calc_B(self.eq['rzout'][:, 0], self.eq['rzout'][:, 1])
+        # bp_lcfs = np.sqrt(B_R**2 + B_Z**2)
         # bp_avg = np.mean(bp_lcfs)
 
         betat = self.volavgP / (self.bt**2 / (2 * self.mu0))
@@ -193,7 +98,7 @@ class epednn_class:
             # 1. Tell juliapkg to add your local EPEDNN package in development mode.
             # This registers it with the isolated Julia environment PythonCall uses.
             epednn_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), # ESCAPE root (src/epednn/..)
                 "dependencies",
                 "EPEDNN.jl",
             )
@@ -271,7 +176,7 @@ class epednn_class:
             import sys
             import importlib
             from pathlib import Path
-            epednn_root = Path(__file__).resolve().parent.parent / "dependencies" / "epednn_mit"
+            epednn_root = Path(__file__).resolve().parents[2] / "dependencies" / "epednn_mit" # ESCAPE root (src/epednn/..)
             epednn_src = epednn_root / "src"
             if not epednn_src.is_dir():
                 raise FileNotFoundError(
@@ -299,7 +204,7 @@ class epednn_class:
 
         self.bt = np.array(self.calc_B(self.eq['raxis'],self.eq['zaxis'])[1][2])
 
-    def feed_epednn(self, model='EPED1', EPEDNN_core='pfile', pres_gfile=False, ne_ped_h=None, psin_ped=None):
+    def feed_epednn(self, model='EPED1', pres_gfile=False, ne_ped_h=None, psin_ped=None):
         """Run the EPEDNN model
         
         parameters
@@ -315,11 +220,11 @@ class epednn_class:
         if ne_ped_h is not None:
             self.ne_ped_h = ne_ped_h
         elif psin_ped is not None:
-            self.ne_ped_h = interp1d(self.psi_ne_eval,self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(psin_ped)
+            self.ne_ped_h = interp1d(self.psi_ne_eval,self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(1-psin_ped)
         else:
             raise NotImplementedError('need to specify either a radial location of or the actual value of the density to give to EPEDNN as ne_ped')
         
-        self.calc_betan(self._x_ne,self._neped,EPEDNN_core,pres_gfile)
+        self.calc_betan(pres_gfile)
         print(f'betan: {self.betan}')
 
         inputs = {
@@ -330,7 +235,7 @@ class epednn_class:
             "ip": float(abs(self.Ip)),          # Plasma current (MA)
             "kappa": float(self.kappa),       # Elongation
             "m": float(self.M_eff),           # Effective mass (must be 2.0 for D or 2.5 for D-T)
-            "neped": float(ne_ped_h / (1e19)),       # Pedestal density (in 10^19 m^-3)
+            "neped": float(self.ne_ped_h / (1e19)),       # Pedestal density (in 10^19 m^-3)
             "r": float(self.Rmajor),           # Major radius (m)
             "zeffped": float(self.Z_eff)      # Effective charge
         }
@@ -357,7 +262,6 @@ class epednn_class:
             # The solution structure has pressure and width for different modes (GH, G, H)
             self.pedestal_pressure = solution.pressure.GH.H  # in MPa
             self.pedestal_width = solution.width.GH.H        # in normalized poloidal flux
-
 
         elif model == 'EPED_SPARC':
             ''' Training dataset was on (in order of input position from the EPEDNN_MIT README): 

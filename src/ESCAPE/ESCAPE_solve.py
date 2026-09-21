@@ -7,7 +7,7 @@ import shutil
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.interpolate import interp1d
 
-ROOT = Path(__file__).resolve().parent.parent  # ESCAPE root (src/..)
+ROOT = Path(__file__).resolve().parents[2]  # ESCAPE root (src/ESCAPE/..)
 sys.path.insert(0, str(ROOT))
 from src.ESCAPE.ESCAPE_api import ESCAPE
 from helpers.ped_width_proxy import ped_width
@@ -16,11 +16,13 @@ from helpers.ped_width_proxy import ped_width
 def ESCAPE_solve(
     sc_params,
     epednn_params,
+    Z_eff = 1,
     Z_i = 1, # Z of ions
     P_tot_e = None, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
     ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
     equil_params = None, # dictionary of required equilibrium parameters
     kprof_params = None, # dictionary of required kinetic profile (density, temperature) parameters
+    quasineutral_flag = True,
     T_rat_flag = True, # True if using a temperature ratio between ions and electrons, False if doing something else
     T_rat = 1,
     pol_norm = False, # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
@@ -44,11 +46,13 @@ def ESCAPE_solve(
     """
 
     state = ESCAPE(
+        Z_eff = Z_eff,
         Z_i = Z_i, # Z of ions
         P_tot_e = P_tot_e, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
         ne_x0 = ne_x0, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
         equil_params = equil_params, # dictionary of required equilibrium parameters
         kprof_params = kprof_params, # dictionary of required kinetic profile (density, temperature) parameters
+        quasineutral_flag = quasineutral_flag,
         T_rat_flag = T_rat_flag, # True if using a temperature ratio between ions and electrons, False if doing something else
         T_rat = T_rat,
         pol_norm = pol_norm, # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
@@ -58,7 +62,7 @@ def ESCAPE_solve(
     )
     print("Initial state built.")
 
-    state.setup_epednn(model=epednn_params['model'])
+    state.setup_epednn(model=epednn_params['epednn_model'])
     print("One-time EPEDNN setup was successful.")
 
     # Clear outputs from any previous scan (including appended failure logs) and setup logging files
@@ -77,7 +81,6 @@ def ESCAPE_solve(
     pedestal_height = None
     pedestal_width = None
     betan = -1 # initialize to -1 to indicate that betan is not yet calculated
-    SOLVE_KW = {}
 
     # psi_N <-> x map
     psi_N_pres = np.asarray(state.psi_N_pres, dtype=float)
@@ -93,36 +96,50 @@ def ESCAPE_solve(
 
         # First iteration defaults to tanh guess
         if ESCAPE_iter == 0:
-            SOLVE_KW['initial_guess'] = "tanh"
-            if sc_params['model'] == "3D":
-                SOLVE_KW['nCX_ic'] = "scale nFC"
-                SOLVE_KW['nFC_ic'] = "solve"
+            sc_params['initial_guess'] = "tanh"
+        else:
+            sc_params['initial_guess'] = "state"
 
         # SAARELMA-CONNOR SOLVE
         state.init_saarelmaconnor(params=sc_params)
-        res = state.solve_scmodel(model=sc_params['model'],**SOLVE_KW)
+        res = state.solve_scmodel(**sc_params) # model and implementation are keys of sc_params
         x_sol, ne_sol = res['x'], res['ne']
         nFC_sol, nCX_sol = res['nFC'], res['nCX']
         T_e_pres, psi_N_pres = res['T_e_pres'], res['psi_N_pres']
         sol = {'x': x_sol, 'ne': ne_sol, 'nFC': nFC_sol, 'nCX': nCX_sol,
-               'T_e': T_e_pres, 'psi_N': psi_N_pres,'SOLVE_KW': SOLVE_KW}
+               'T_e': T_e_pres, 'psi_N': psi_N_pres,'SOLVE_KW': sc_params}
 
-        # Update state
-        state.psi_ne_eval = x_to_psi(x_sol)
-        state.n_e = ne_sol
+        # Raise density core profile to match new density pedestal
+        psi_N_core = np.linspace(0, state.psi_N_inner_boundary, 75)
+        _n_e_core = interp1d(state.psi_ne_eval, state.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(psi_N_core)
+        n_e_core_at_ped = interp1d(state.psi_ne_eval, state.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(state.psi_N_inner_boundary)
+        ne_ped_at_top = interp1d(x_sol, ne_sol, kind='linear', bounds_error=False, fill_value='extrapolate')(state.x_inner)
+        delta = ne_ped_at_top - n_e_core_at_ped
+        n_e_core = _n_e_core + delta # change core stiffly to match pedestal top
+        
+        # Calculate total n_e and T_e
+        psi_N_ped = interp1d(state.x_init, state.psi_N_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(x_sol)
+        psi_N_plasma = np.concatenate([psi_N_core[:-1], psi_N_ped])
+        n_e_plasma = np.concatenate([n_e_core[:-1], ne_sol])
+
+        # Update state (n_i follows n_e when quasineutral_flag, T_i follows T_e when T_rat_flag)
+        state.set_kprof_params({
+            'n_e': n_e_plasma,   'psin_ne': psi_N_plasma,
+            'nFC': nFC_sol,      'psin_nFC': x_to_psi(x_sol),
+            'nCX': nCX_sol,      'psin_nCX': x_to_psi(x_sol),
+        })
 
         # EPEDNN SOLVE with updated state
         if ESCAPE_iter == 0:
             pedestal_height_prev = 0.0
             pedestal_width_prev = 0.0
-            pw = ped_width(psi_to_x(state.psi_ne_eval), state.n_e) # pedestal width from proxy for first ESCAPE iteration
+            pw = ped_width(state.psi_ne_eval, state.n_e) # pedestal width from proxy for first ESCAPE iteration
 
-            pedestal_height, pedestal_width, betan = state.feed_epednn(model=epednn_params['epednn_model'], EPEDNN_core='pfile', psin_ped=pw)    
+            pedestal_height, pedestal_width, betan = state.feed_epednn(model=epednn_params['epednn_model'], psin_ped=pw, pres_gfile=epednn_params['pres_gfile'])    
         else:
             pedestal_height_prev, pedestal_width_prev = pedestal_height, pedestal_width
-            pw = psi_to_x(1 - pedestal_width_prev) # pedestal width from EPEDNN for non-first ESCAPE iterations
 
-            pedestal_height, pedestal_width, betan = state.feed_epednn(model=epednn_params['epednn_model'], EPEDNN_core=epednn_params['EPEDNN_core'], psin_ped=pw)
+            pedestal_height, pedestal_width, betan = state.feed_epednn(model=epednn_params['epednn_model'], psin_ped=pedestal_width_prev, pres_gfile=epednn_params['pres_gfile'])
 
         if ESCAPE_iter > 0:
             eped_tol = abs((pedestal_height - pedestal_height_prev) / pedestal_height_prev) + abs((pedestal_width - pedestal_width_prev) / pedestal_width_prev)
@@ -136,7 +153,7 @@ def ESCAPE_solve(
         # T(psi_ped) = Te_ped derived from EPED pedestal pressure (p_ped =
         # 2 * ne_ped * Te_ped, Ti = Te, Zeff ~ 1).
         tanh_width_new = psi_to_x(1-pedestal_width) * -1
-        SOLVE_KW['tanh_width'] = tanh_width_new
+        sc_params['tanh_width'] = tanh_width_new
         Delta = float(pedestal_width)
         psi_mid = 1.0 - 0.5 * Delta
         psi_ped = 1.0 - Delta
@@ -185,9 +202,8 @@ def ESCAPE_solve(
             assert False, 'specified regime_flag not supported'
         '''
         
-        # Update temperature state (include core profile)
-        state.T_e = T_prof_keV
-        state.psi_Te_eval = psi_N_Te_new
+        # Update temperature state (include core profile); T_i follows T_e when T_rat_flag
+        state.set_kprof_params({'T_e': T_prof_keV, 'psin_Te': psi_N_Te_new})
 
         # Store the new state and resave iteration
         sol['psi_Te_eval'] = state.psi_Te_eval
@@ -200,7 +216,7 @@ def ESCAPE_solve(
         sol['pedestal_height'] = float(pedestal_height)
         sol['pedestal_width'] = float(pedestal_width)
         sol['model'] = res['model']
-        sol['solver_structure'] = res['solver_structure']
+        sol['implementation'] = res['implementation']
         sol['diagnostics'] = res['diagnostics']
         np.save(f'{out_dir_p}/ne_and_Te_iter_{ESCAPE_iter}.npy', sol, allow_pickle=True)
 
