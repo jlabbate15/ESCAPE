@@ -45,6 +45,7 @@ class ESCAPE_state:
     def __init__(
         self,
         Z_i = 1, # Z of ions
+        Z_eff = 1, # effective Z in plasma
         P_tot_e = None, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
         ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
         equil_params = None, # dictionary of required equilibrium parameters
@@ -89,6 +90,7 @@ class ESCAPE_state:
         self.calc_gradr() # only a function of geometry
 
         self.Z_i = Z_i
+        self.Z_eff = Z_eff
         self.e_i = Z_i * constants.e # C
         self.k_B = 1.38064852e-23 # J/K, Boltzmann constant
 

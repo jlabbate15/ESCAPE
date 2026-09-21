@@ -2,6 +2,7 @@ import numpy as np
 from scipy.interpolate import RectBivariateSpline, interp1d
 from scipy.integrate import simpson
 from scipy import constants
+import os
 
 
 class epednn_class:
@@ -297,48 +298,29 @@ class epednn_class:
             self.epednn_model = generate(weights)
 
         self.bt = np.array(self.calc_B(self.eq['raxis'],self.eq['zaxis'])[1][2])
-        # print(f'bt: {self.bt}')
 
-    def feed_epednn(self, model='EPED1', ne_ped=None, x_ne=None, psiN_Te=None, Te_prev=None, EPEDNN_core='pfile', pres_gfile=False, Z_eff=None, neped_value=None, neped_x_loc=None):
-        """Feed the Saarelma-Connor solution to the EPEDNN model
+    def feed_epednn(self, model='EPED1', EPEDNN_core='pfile', pres_gfile=False, ne_ped_h=None, psin_ped=None):
+        """Run the EPEDNN model
+        
+        parameters
+        ____________________________________________
+        ne_ped_h : float
+        specify if you want to manually specify the pedestal height (likely only for testing)
 
-           ne_ped: array
-           Array of density values in the pedestal
-
-           neped_value: float
-           Single value to feed to EPEDNN as the neped value
+        psin_ped : float
+        specify if you want to manually specify the pedestal height using the pedestal width
         """
-        # ne_ped is the entire pedestal profile here, not just the pedestal density height
         
         # Define inputs in Python
-        if ne_ped is None:
-            self._neped = interp1d(self.x_sol, self.ne_sol, kind='linear', bounds_error=False, fill_value='extrapolate')(self.x_inner) / (1e19) # m^-3 -> 10^19 m^-3
-            self._x_ne = self.x_sol
+        if ne_ped_h is not None:
+            self.ne_ped_h = ne_ped_h
+        elif psin_ped is not None:
+            self.ne_ped_h = interp1d(self.psi_ne_eval,self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(psin_ped)
         else:
-            self._neped = ne_ped
-            if x_ne is None:
-                print('Warning: Most functionalities require x_ne to be provided if ne_ped is provided')
-                self._x_ne = None
-            else:
-                self._x_ne = x_ne
-        self.calc_betan(self._x_ne,self._neped,psiN_Te,Te_prev,EPEDNN_core,pres_gfile)
+            raise NotImplementedError('need to specify either a radial location of or the actual value of the density to give to EPEDNN as ne_ped')
+        
+        self.calc_betan(self._x_ne,self._neped,EPEDNN_core,pres_gfile)
         print(f'betan: {self.betan}')
-
-        if neped_value is not None:
-            ne_ped_h = float(neped_value)  # already in 10^19 m^-3
-        elif neped_x_loc is not None: # this is the route that profiles_loop_solve.py takes
-            ne_ped_h = interp1d(self._x_ne, self._neped, kind='linear', bounds_error=False, fill_value='extrapolate')(neped_x_loc) / (1e19) # m^-3 -> 10^19 m^-3
-        elif self._x_ne is None:
-            ne_ped_h = self._neped
-        else:
-            ne_ped_h = interp1d(self._x_ne, self._neped, kind='linear', bounds_error=False, fill_value='extrapolate')(self.x_inner) / (1e19) # m^-3 -> 10^19 m^-3
-        self.neped_epednn = float(ne_ped_h)  # 10^19 m^-3, what EPEDNN actually received
-
-        if Z_eff is None:
-            self.Z_eff = 1.0
-            print('Warning: Z_eff is not provided, assuming Z_eff = 1.0')
-        else:
-            self.Z_eff = Z_eff
 
         inputs = {
             "a": float(self.a),           # Minor radius (m)
@@ -348,7 +330,7 @@ class epednn_class:
             "ip": float(abs(self.Ip)),          # Plasma current (MA)
             "kappa": float(self.kappa),       # Elongation
             "m": float(self.M_eff),           # Effective mass (must be 2.0 for D or 2.5 for D-T)
-            "neped": float(ne_ped_h),       # Pedestal density (in 10^19 m^-3)
+            "neped": float(ne_ped_h / (1e19)),       # Pedestal density (in 10^19 m^-3)
             "r": float(self.Rmajor),           # Major radius (m)
             "zeffped": float(self.Z_eff)      # Effective charge
         }
@@ -453,15 +435,5 @@ class epednn_class:
             self.pedestal_pressure = solution[0] / 1000     # in MPa -> kPa
             self.pedestal_width = solution[1]              # in normalized poloidal flux
 
-
-
-        # Apply ELM-free regime scaling
-        if self.regime_flag == 'PT H-mode':
-            pass
-        elif self.regime_flag == 'NT':
-            self.pedestal_pressure = self.pedestal_pressure * self.NT_scaling
-            raise NotImplementedError('NT ELM-free regime scaling is not yet implemented')
-        else:
-            assert False, 'specified regime_flag not supported'
 
         return self.pedestal_pressure, self.pedestal_width, self.betan

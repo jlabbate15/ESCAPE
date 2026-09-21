@@ -8,6 +8,18 @@ from matplotlib.path import Path as _MplPath
 from src.adas.adas_ionisation import scd_adas
 from src.adas.adas_cx import scx_adas
 from src.radas.radas_rates import scd_radas, scx_radas
+try:
+    from firedrake import (
+        IntervalMesh, FunctionSpace, MixedFunctionSpace, Function,
+        TestFunctions, Constant, DirichletBC,
+        dx, ds, split, solve, assemble, SpatialCoordinate,
+        tanh as fd_tanh,
+    )
+    _FIREDRAKE_AVAILABLE = True
+    _FIREDRAKE_IMPORT_ERR = None
+except Exception as _firedrake_import_err:
+    _FIREDRAKE_AVAILABLE = False
+    _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
 
 class SaarelmaConnorBase:
@@ -25,12 +37,6 @@ class SaarelmaConnorBase:
 
     Parameters
     ----------
-    Z_i : int
-        Z of ions
-    P_tot_e : float
-        Total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox, W
-    ne_x0 : float
-        m^-3, electron density at the separatrix (boundary condition)
     psi_N_inner_boundary : float
         psi_N to choose the inner boundary boundary condition. If None, inner boundary is chosen based on nFC_threshold and nCX_threshold.
     nFC_threshold : float or None
@@ -39,20 +45,6 @@ class SaarelmaConnorBase:
     nCX_threshold : float or None
         Fraction of the peak estimated CX neutral density below which the inner
         boundary is placed.  Default 0.01 (1 %).  Set to None to disable. Not used if psi_N_inner_boundary!=None
-    equil_params : dict
-        Dictionary of required equilibrium parameters
-    kprof_params : dict
-        Dictionary of required kinetic profile parameters
-    T_rat_flag : bool
-        True if the temperature ratio is given, False if the temperature ratio is to be calculated
-    T_rat : float
-        Temperature ratio between ions and electrons, dimensionless
-        Ignored if T_rat_flag is False
-        Default is 1
-    pol_norm : bool
-        True if the poloidal flux is normalized by 2pi, False if the poloidal flux is not normalized by 2pi
-    species : string
-        Species of ions, currently supporting: D, D-T
     initial_guess : string
         Initial guess for the electron density profile, currently supporting: pfile
     verbose : bool
@@ -60,13 +52,15 @@ class SaarelmaConnorBase:
     """
     def init_saarelmaconnor(
         self,
-        psi_N_inner_boundary = 0.85, # normalized poloidal flux at the inner boundary (boundary condition); overridden by find_inner_boundary if nFC_threshold or nCX_threshold is set
-        nFC_threshold = None, # fraction of nFC at the separatrix below which the inner boundary is placed (None to disable)
-        nCX_threshold = None, # fraction of nCX at the separatrix below which the inner boundary is placed (None to disable)
-        initial_guess = None, # initial guess for the electron density profile
-        x_method = 'radas', # method to use for the cross-section rates, currently supporting: 'adas', 'radas'
-        verbose = False,
+        params,
     ):
+
+        psi_N_inner_boundary = params['psi_N_inner_boundary'], # normalized poloidal flux at the inner boundary (boundary condition); overridden by find_inner_boundary if nFC_threshold or nCX_threshold is set
+        nFC_threshold = params['nFC_threshold'], # fraction of nFC at the separatrix below which the inner boundary is placed (None to disable)
+        nCX_threshold = params['nCX_threshold'], # fraction of nCX at the separatrix below which the inner boundary is placed (None to disable)
+        initial_guess = params['initial_guess'], # initial guess for the electron density profile
+        x_method = params['x_method'], # method to use for the cross-section rates, currently supporting: 'adas', 'radas'
+        verbose = params['verbose'],
 
         self.initial_guess = initial_guess
 
@@ -103,25 +97,19 @@ class SaarelmaConnorBase:
         self.rho_s = interp1d(self.psi_Te_eval[valid], self.rho_s[valid], kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_Te_eval) # removes nan values from rho_s
 
         # Interpolate quantities onto the pressure psi_N grid
-        T_e_pres = interp1d(self.psi_Te_eval, self.T_e, kind='linear',
-                            bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
+        T_e_pres = interp1d(self.psi_Te_eval, self.T_e, kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
         self.T_e_pres = T_e_pres * (1e3) # eV, on psi_N_pres grid
-        self.T_i_pres = interp1d(
-            self.psi_Ti_eval, self.T_i, kind='linear',
-            bounds_error=False, fill_value='extrapolate'
-        )(self.psi_N_pres) * (1e3)  # eV
-        self.n_e_pres = interp1d(self.psi_ne_eval, self.n_e, kind='linear',
-                            bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
-        self.n_i_pres = interp1d(self.psi_ni_eval, self.n_i, kind='linear',
-                            bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
-        self.c_s = interp1d(self.psi_Te_eval, self.c_s, kind='linear',
-                       bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
-        self.rho_s = interp1d(self.psi_Te_eval, self.rho_s, kind='linear',
-                         bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
+        self.T_i_pres = interp1d(self.psi_Ti_eval, self.T_i, kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_N_pres) * (1e3)  # eV
+        self.n_e_pres = interp1d(self.psi_ne_eval, self.n_e, kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
+        self.n_i_pres = interp1d(self.psi_ni_eval, self.n_i, kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
+        self.c_s = interp1d(self.psi_Te_eval, self.c_s, kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
+        self.rho_s = interp1d(self.psi_Te_eval, self.rho_s, kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
 
         grad_Te = np.gradient(self.T_e_pres * (1.60218e-19), self.r_psi) # gradient in J/m, T_e_pres is in eV
         self.D_ETG_x = self.P_tot_e / (self.S_plasma * abs(grad_Te)) # evaluated at each psi_N_pres, not including free parameter De_chie_etg and n_e
         self.D_NEO = 0.05 * (self.c_s * self.rho_s**2) / self.a
+
+        self.setup_solver_grids()
 
 
     def calc_pressure_quantities_sc(self,n_e,x):
@@ -455,14 +443,12 @@ class SaarelmaConnorBase:
             self.fCX = np.ones_like(x)
 
 
-    def setup_solver_grids(self,res = 100):
+    def setup_solver_grids(self):
         """Setup the grids for the solver and calculates the flux surface-averaged |grad(r)| and |grad(r)|^2
         Parameters
         ----------
         self : object
             instance of saarelma_connor class
-        res : int, optional
-            number of points to use in the radial grid if using the first method of defining the radial grid
 
         Returns
         -------
@@ -480,11 +466,6 @@ class SaarelmaConnorBase:
             Volume of the charge-exchange neutral at each psi_N_pres surface.
         """
 
-        # one method of defining the radial grid, requires uncommenting the rsep_mid definition in the mhd_load function
-        # self.rmid = np.linspace(0, self.rsep_mid, res) # m, radial grid (shifted so zero is at the magnetic axis)
-        # self.xmid = self.rmid - self.rsep_mid # m, radial grid (shifted so zero is at the separatrix)
-
-        # another method of defining the radial grid
         # self.r_psi is the outboard midplane minor radius for each flux surface for the psi_N_pres grid
         self.x_init = self.r_psi - self.r_psi[-1] # m, radial grid (shifted so zero is at the separatrix) only at midplane, defined on the psi_N_pres grid
         self.x_prev = self.x_init.copy() # m, radial grid (shifted so zero is at the separatrix) only at midplane, defined on the psi_N_pres grid
@@ -494,7 +475,7 @@ class SaarelmaConnorBase:
         self.S_cx_pres = interp1d(self.psi_Te_eval, self.S_cx, kind='linear', bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
         self.V_cx_pres = interp1d(self.psi_Te_eval, np.abs(self.V_cx), kind='linear', bounds_error=False, fill_value='extrapolate')(self.psi_N_pres)
 
-        # note all 1D quantities are now defined on the psi_N_pres grid, which is the same as the x_prev grid
+        # all 1D quantities are now defined on the psi_N_pres grid, which is the same as the x_prev grid
 
         self.x_inner = interp1d(self.psi_N_pres, self.x_prev, kind='linear', bounds_error=False, fill_value='extrapolate')(self.psi_N_inner_boundary)
 
@@ -1249,14 +1230,8 @@ class SaarelmaConnorBase:
         return A_interp(self.psi_RZ_N)
 
     # ------------------------------------------------------------------
-    # Unified solver interface
+    # Unified Saarelma-Connor solver interface
     # ------------------------------------------------------------------
-    #
-    # `solve()` and `_build_result_dict()` live on the base class, but the
-    # solvers they reach are supplied by the two mixins, so they only work
-    # on the assembled class (`src.saarelma_connor.saarelma_connor_api.saarelma_connor`).  Keeping
-    # them here keeps the dispatch and the result schema in one place, next
-    # to the shared setup the two models both rely on.
 
     #: Public model name -> the solver entry point it dispatches to.
     _MODEL_ENTRY_POINTS = {
