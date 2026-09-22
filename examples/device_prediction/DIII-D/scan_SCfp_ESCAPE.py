@@ -14,8 +14,8 @@ from examples.device_prediction.helper_functions import calc_pressure_profile
 
 
 # ---------------------- COMMON USER INPUTS ----------------------
-equil_num = 4 # None for all
-equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
+equil_num = None # None for all
+# equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
 equil_list = None
 output_dir = f'DIIIDSnyder_ESCAPE_test'
 
@@ -133,7 +133,7 @@ def state_to_dict(state):
 
 # ESCAPE parameters
 ESCAPE_tol_max = 1e-5
-ESCAPE_iter_max = 200
+ESCAPE_iter_max = 5
 out_dir = output_dir
 ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
 quasineutral_flag = True
