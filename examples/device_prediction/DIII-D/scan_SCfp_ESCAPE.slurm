@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=DIII-D_SCfp_ESCAPE
+#SBATCH --job-name=DIII-D_SCfp_ESCAPE_3Dfiredrakeinner
 #SBATCH --partition=LocalQ
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

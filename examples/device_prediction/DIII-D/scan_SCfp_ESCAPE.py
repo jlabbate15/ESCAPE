@@ -11,19 +11,26 @@ from helpers.load_equil import initialize_inputs
 from helpers.parse_equil import mhd_load
 from helpers.parse_prof import kprof_load
 from examples.device_prediction.helper_functions import calc_pressure_profile
+import time
 
 
 # ---------------------- COMMON USER INPUTS ----------------------
 equil_num = None # None for all
 # equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
 equil_list = None
-output_dir = f'DIIIDSnyder_ESCAPE_test'
 
 alpha_crits = np.array([0.01])
 nFC_x0s = np.array([1e15])
 C_KBMs = np.array([0.0])
 De_chie_etgs = np.array([0.5])
 ncx_x0_ratios = np.array([15])
+
+# Overridable from the environment (see submit_scan.sh)
+sc_model = os.environ.get('SC_MODEL', '3D')
+sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'firedrake')
+ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'inner')
+
+output_dir = f'DIIIDSnyder_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}'
 # ----------------------------------------------------------------
 
 
@@ -151,14 +158,14 @@ sc_params = {
     'nCX_threshold': None, # fraction of nCX at the separatrix below which the inner boundary is placed (None to disable)
     'x_method': 'radas', # method to use for the cross-section rates, currently supporting: 'adas', 'radas'
     'verbose': False,
-    'model': '3D',
-    'implementation': 'firedrake',
+    'model': sc_model,
+    'implementation': sc_implementation,
 }
 
 # Saarelma-Connor (SC) shared solver parameters
 sc_params.update({
     'x_res':40,
-    'ne_grad_bc_loc':"inner",
+    'ne_grad_bc_loc':ne_grad_bc_loc,
     'picard_max_it':50,
     'picard_rtol':1e-6,
     'picard_relax':1.0,
@@ -251,58 +258,62 @@ for mhd_fp, kprof_fp in equilibria:
             out_dir.mkdir(parents=True, exist_ok=True)
 
 
-            # try:
-            state = ESCAPE_solve(
-                sc_params,
-                epednn_params,
-                Z_i = Z_i, # Z of ions
-                Z_eff = Z_eff, 
-                P_tot_e = P_tot_e, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
-                ne_x0 = ne_x0, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
-                equil_params = equil_params, # dictionary of required equilibrium parameters
-                kprof_params = kprof_params, # dictionary of required kinetic profile (density, temperature) parameters
-                quasineutral_flag = quasineutral_flag,
-                T_rat_flag = T_rat_flag, # True if using a temperature ratio between ions and electrons, False if doing something else
-                T_rat = T_rat,
-                pol_norm = pol_norm, # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
-                species = species, # species of ions, currently supporting: D, D-T
-                regime_flag = regime_flag, # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
-                ESCAPE_iter_max = ESCAPE_iter_max, 
-                ESCAPE_tol_max = ESCAPE_tol_max,
-                out_dir = out_dir, # directory to output files
-                verbose = verbose_ESCAPE,
-            )
+            try:
+                t0 = time.perf_counter()
+                state = ESCAPE_solve(
+                    sc_params,
+                    epednn_params,
+                    Z_i = Z_i, # Z of ions
+                    Z_eff = Z_eff, 
+                    P_tot_e = P_tot_e, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
+                    ne_x0 = ne_x0, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
+                    equil_params = equil_params, # dictionary of required equilibrium parameters
+                    kprof_params = kprof_params, # dictionary of required kinetic profile (density, temperature) parameters
+                    quasineutral_flag = quasineutral_flag,
+                    T_rat_flag = T_rat_flag, # True if using a temperature ratio between ions and electrons, False if doing something else
+                    T_rat = T_rat,
+                    pol_norm = pol_norm, # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
+                    species = species, # species of ions, currently supporting: D, D-T
+                    regime_flag = regime_flag, # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
+                    ESCAPE_iter_max = ESCAPE_iter_max, 
+                    ESCAPE_tol_max = ESCAPE_tol_max,
+                    out_dir = out_dir, # directory to output files
+                    verbose = verbose_ESCAPE,
+                )
+                t1 = time.perf_counter()
 
-            # ESCAPE pedestal from the final EPEDNN call on the returned state
-            ped_wid = state.pedestal_width      # normalized poloidal flux
-            # EPED1 returns MPa (as ESCAPE_solve assumes); convert to Pa to
-            # match the experimental p_Pa below
-            ped_h_out = state.pedestal_pressure * 1e6 # Pa
 
-            # Experimental pedestal pressure at psi_N = 1 - ped_wid, from the
-            # input profiles (psi_N_p / p_Pa built once per equilibrium above).
-            psi_ped_top = 1.0 - float(ped_wid)
-            p_at_ped_top = float(np.interp(psi_ped_top, psi_N_p, p_Pa))
+                # ESCAPE pedestal from the final EPEDNN call on the returned state
+                ped_wid = state.pedestal_width      # normalized poloidal flux
+                # EPED1 returns MPa (as ESCAPE_solve assumes); convert to Pa to
+                # match the experimental p_Pa below
+                ped_h_out = state.pedestal_pressure * 1e6 # Pa
 
-            # Save model output
-            out_dict = {
-                'mhd_fp': mhd_fp,
-                'kprof_fp': kprof_fp,
-                'profiles': profiles,
-                'ESCAPE_ped_h': ped_h_out, # Pa
-                'ESCAPE_ped_wid': ped_wid,
-                'experimental_ped_h': p_at_ped_top, # Pa
-                'free_params': free_params,
-                'p_mode': p_mode,
-                'Zeff': Z_eff,
-                'P_tot_e': P_tot_e,
-                'i': i,
-                'state': state_to_dict(state), # picklable ESCAPE state attributes
-            }
-            np.save(out_dir / 'out_dict.npy', out_dict)
-            # except Exception as e:
-            #     out_dict = {'failed': True, 'free_params': free_params, 'error': str(e)}
-            #     np.save(out_dir / 'failed.npy', out_dict)
+                # Experimental pedestal pressure at psi_N = 1 - ped_wid, from the
+                # input profiles (psi_N_p / p_Pa built once per equilibrium above).
+                psi_ped_top = 1.0 - float(ped_wid)
+                p_at_ped_top = float(np.interp(psi_ped_top, psi_N_p, p_Pa))
+
+                # Save model output
+                out_dict = {
+                    'mhd_fp': mhd_fp,
+                    'kprof_fp': kprof_fp,
+                    'profiles': profiles,
+                    'ESCAPE_ped_h': ped_h_out, # Pa
+                    'ESCAPE_ped_wid': ped_wid,
+                    'experimental_ped_h': p_at_ped_top, # Pa
+                    'free_params': free_params,
+                    'p_mode': p_mode,
+                    'Zeff': Z_eff,
+                    'P_tot_e': P_tot_e,
+                    'i': i,
+                    'state': state_to_dict(state), # picklable ESCAPE state attributes
+                    'ESCAPE_runtime': t1-t0,
+                }
+                np.save(out_dir / 'out_dict.npy', out_dict)
+            except Exception as e:
+                out_dict = {'failed': True, 'free_params': free_params, 'error': str(e)}
+                np.save(out_dir / 'failed.npy', out_dict)
 
             if i%50 == 0:
                 print(f'Scan {i} of {scan_total} completed')
