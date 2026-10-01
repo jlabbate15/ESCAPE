@@ -216,46 +216,46 @@ def calc_pressure_profile(profiles):
 
     if 'polflux' in profiles:
         psi_N, _ = psi_n_and_rho_psi(profiles)
-        ne = _density_to_m3(profiles['ne'], profiles)
-        Te_keV = np.asarray(profiles['Te'], dtype=float)
-        Ti_keV = np.asarray(profiles['Ti'], dtype=float) if 'Ti' in profiles else None
-        ni = _density_to_m3(profiles['ni'], profiles) if 'ni' in profiles else None
-    elif 'psi_N_ne' in profiles and 'psi_N_Te' in profiles:
-        psi_N = np.asarray(profiles['psi_N_ne'], dtype=float)
-        ne = _density_to_m3(profiles['ne'], profiles)
-        Te_keV = _interp_to_psi(profiles['psi_N_Te'], profiles['Te'], psi_N)
+        ne = _density_to_m3(profiles['n_e'], profiles)
+        Te_keV = np.asarray(profiles['T_e'], dtype=float)
+        Ti_keV = np.asarray(profiles['T_i'], dtype=float) if 'Ti' in profiles else None
+        ni = _density_to_m3(profiles['n_i'], profiles) if 'ni' in profiles else None
+    elif 'psin_ne' in profiles and 'psin_Te' in profiles:
+        psi_N = np.asarray(profiles['psin_ne'], dtype=float)
+        ne = _density_to_m3(profiles['n_e'], profiles)
+        Te_keV = _interp_to_psi(profiles['psin_Te'], profiles['T_e'], psi_N)
         if 'Ti' in profiles:
-            psi_Ti = profiles.get('psi_N_Ti', profiles['psi_N_Te'])
-            Ti_keV = _interp_to_psi(psi_Ti, profiles['Ti'], psi_N)
+            psi_Ti = profiles.get('psin_Ti', profiles['psin_Te'])
+            Ti_keV = _interp_to_psi(psi_Ti, profiles['T_i'], psi_N)
         else:
             Ti_keV = None
         if 'ni' in profiles:
-            psi_ni = profiles.get('psi_N_ni', profiles['psi_N_ne'])
+            psi_ni = profiles.get('psin_ni', profiles['psin_ne'])
             ni = _density_to_m3(
-                _interp_to_psi(psi_ni, profiles['ni'], psi_N), profiles
+                _interp_to_psi(psi_ni, profiles['n_i'], psi_N), profiles
             )
         else:
             ni = None
     else:
         rho_ne = profiles.get('rho_ne', profiles.get('rho'))
         rho_Te = profiles.get('rho_Te', rho_ne)
-        if rho_ne is None or 'ne' not in profiles or 'Te' not in profiles:
+        if rho_ne is None or 'n_e' not in profiles or 'T_e' not in profiles:
             raise KeyError(
                 "Need either polflux+ne+Te, or rho_ne/rho_Te+ne+Te "
                 f"(keys: {list(profiles)})"
             )
         psi_N = _psi_n_from_rho(rho_ne)
-        ne = _density_to_m3(profiles['ne'], profiles)
-        Te_keV = _interp_to_psi(_psi_n_from_rho(rho_Te), profiles['Te'], psi_N)
+        ne = _density_to_m3(profiles['n_e'], profiles)
+        Te_keV = _interp_to_psi(_psi_n_from_rho(rho_Te), profiles['T_e'], psi_N)
         if 'Ti' in profiles:
             rho_Ti = profiles.get('rho_Ti', rho_Te)
-            Ti_keV = _interp_to_psi(_psi_n_from_rho(rho_Ti), profiles['Ti'], psi_N)
+            Ti_keV = _interp_to_psi(_psi_n_from_rho(rho_Ti), profiles['T_i'], psi_N)
         else:
             Ti_keV = None
         if 'ni' in profiles:
             rho_ni = profiles.get('rho_ni', rho_ne)
             ni = _density_to_m3(
-                _interp_to_psi(_psi_n_from_rho(rho_ni), profiles['ni'], psi_N),
+                _interp_to_psi(_psi_n_from_rho(rho_ni), profiles['n_i'], psi_N),
                 profiles,
             )
         else:

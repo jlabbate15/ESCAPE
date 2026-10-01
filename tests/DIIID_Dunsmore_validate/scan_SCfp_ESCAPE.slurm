@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=DIII-D_SCfp_ESCAPE_3Dfiredrakeinner
+#SBATCH --job-name=DIIIDDunsmore_ESCAPE_3Dfiredrakeinner
 #SBATCH --partition=LocalQ
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --time=24:00:00
-#SBATCH --output=DIII-D_scan%j.out
-#SBATCH --error=DIII-D_scan%j.err
-#SBATCH --chdir=/mnt/homes_global/jal2351/software/ESCAPE/examples/device_prediction/DIII-D
+#SBATCH --output=DIIIDDunsmore_scan%j.out
+#SBATCH --error=DIIIDDunsmore_scan%j.err
+#SBATCH --chdir=/mnt/homes_global/jal2351/software/ESCAPE/tests/DIIID_Dunsmore_validate
 
 set -euo pipefail
 

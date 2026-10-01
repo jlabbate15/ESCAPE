@@ -21,8 +21,8 @@ equil_list = None
 
 alpha_crits = np.array([0.01])
 nFC_x0s = np.array([1e15])
-C_KBMs = np.array([0.0])
-De_chie_etgs = np.array([0.5])
+C_KBMs = np.array([0.3])
+De_chie_etgs = np.array([0.1])
 ncx_x0_ratios = np.array([15])
 
 # Overridable from the environment (see submit_scan.sh)
@@ -30,7 +30,7 @@ sc_model = os.environ.get('SC_MODEL', '3D')
 sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'firedrake')
 ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'inner')
 
-output_dir = f'DIIIDSnyder_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}'
+output_dir = f'DIIIDSnyder_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}_SCtest'
 # ----------------------------------------------------------------
 
 
@@ -140,7 +140,7 @@ def state_to_dict(state):
 
 # ESCAPE parameters
 ESCAPE_tol_max = 1e-5
-ESCAPE_iter_max = 5
+ESCAPE_iter_max = 1
 out_dir = output_dir
 ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
 quasineutral_flag = True

@@ -12,7 +12,7 @@ for sc_model in "${sc_models[@]}"; do
   for sc_implementation in "${sc_implementations[@]}"; do
     for ne_grad_bc_loc in "${ne_grad_bc_locs[@]}"; do
       # Must match output_dir in scan_SCfp_ESCAPE.py
-      name="DIIIDSnyder_ESCAPE_${sc_model}${sc_implementation}${ne_grad_bc_loc}"
+      name="DIIIDDunsmore_ESCAPE_${sc_model}${sc_implementation}${ne_grad_bc_loc}"
       sbatch \
         --job-name="${name}" \
         --output="${name}_%j.out" \

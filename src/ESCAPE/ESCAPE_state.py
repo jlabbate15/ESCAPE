@@ -456,41 +456,59 @@ class ESCAPE_state:
         self.B = np.sqrt(B_R**2 + B_Z**2 + B_phi**2) # T, total magnetic field at each R_eval, Z_eval
         return self.B, [B_R, B_Z, B_phi]
 
-    def set_equil_params(self,eq):
+    def set_equil_params(self,eq,mode='psin2D'):
         self.eq = eq
 
-        bdry = self.find_boundary_points(eq=eq)
+        if mode=='psin2D': # user provides eq as a dictionary with 2D psin information to calculate needed quantities
+            bdry = self.find_boundary_points(eq=eq)
 
-        rmax_top = bdry['top'][0]
-        rmax_bottom = bdry['bottom'][0]
-        zmax_top = bdry['top'][1]
-        zmax_bottom = bdry['bottom'][1]
-        rmax_outboard = bdry['outboard'][0]
-        rmax_inboard = bdry['inboard'][0]
-        z_outboard = bdry['outboard'][1]
-        # zmax_inboard = bdry['inboard'][1]
+            rmax_top = bdry['top'][0]
+            rmax_bottom = bdry['bottom'][0]
+            zmax_top = bdry['top'][1]
+            zmax_bottom = bdry['bottom'][1]
+            rmax_outboard = bdry['outboard'][0]
+            rmax_inboard = bdry['inboard'][0]
+            z_outboard = bdry['outboard'][1]
+            # zmax_inboard = bdry['inboard'][1]
 
-        # Geometric parameters
-        self.Raxis = self.eq['raxis'] # m, location of magnetic axis relative to device rotational line of toroidal symmetry
-        self.Rmajor = (rmax_outboard + rmax_inboard) / 2 # m
-        self.a = (rmax_outboard - rmax_inboard) / 2 # minor radius # m
-        delta_u = (self.Rmajor - rmax_top) / self.a
-        delta_l = (self.Rmajor - rmax_bottom) / self.a
-        self.delta = (delta_u + delta_l) / 2 # dimensionless, total triangularity
-        self.kappa = (zmax_top - zmax_bottom) / (2*self.a) # dimensionless, elongation
+            # Geometric parameters
+            self.Raxis = self.eq['raxis'] # m, location of magnetic axis relative to device rotational line of toroidal symmetry
+            self.Rmajor = (rmax_outboard + rmax_inboard) / 2 # m
+            self.a = (rmax_outboard - rmax_inboard) / 2 # minor radius # m
+            delta_u = (self.Rmajor - rmax_top) / self.a
+            delta_l = (self.Rmajor - rmax_bottom) / self.a
+            self.delta = (delta_u + delta_l) / 2 # dimensionless, total triangularity
+            self.kappa = (zmax_top - zmax_bottom) / (2*self.a) # dimensionless, elongation
 
-        # Plasma parameters (skip the magnetic axis to avoid degenerate zero-area/volume flux surface)
-        self.Ip = self.eq['ip'] / 1e6 # MA, Plasma current
-        self.psi_pres = np.linspace(self.eq['psimag'], self.eq['psibry'], len(self.eq['pres']))[1:]
-        self.psi_N_pres = (self.psi_pres - self.eq['psimag']) / (self.eq['psibry'] - self.eq['psimag'])
-        # self.pres_gfile = self.eq['pres'][1:] # pressure is NOT an input to this model but using this for plotting - want to use pfile pressure instead
+            # Plasma parameters (skip the magnetic axis to avoid degenerate zero-area/volume flux surface)
+            self.Ip = self.eq['ip'] / 1e6 # MA, Plasma current
+            self.psi_pres = np.linspace(self.eq['psimag'], self.eq['psibry'], len(self.eq['pres']))[1:]
+            self.psi_N_pres = (self.psi_pres - self.eq['psimag']) / (self.eq['psibry'] - self.eq['psimag'])
+            # self.pres_gfile = self.eq['pres'][1:] # pressure is NOT an input to this model but using this for plotting - want to use pfile pressure instead
 
-        # Grids
-        self.rgrid = np.linspace(self.eq['rleft'],self.eq['rleft']+self.eq['rdim'],self.eq['nr']) # m, 1D R grid
-        self.zgrid = np.linspace(self.eq['zmid']-self.eq['zdim']/2,self.eq['zmid']+self.eq['zdim']/2,self.eq['nz']) # m, 1D Z grid
-        self.psi_RZ = self.eq['psirz'] # 2D poloidal flux array at each RZ grid point
-        self.psi_RZ_N = (self.psi_RZ - self.eq['psimag']) / (self.eq['psibry'] - self.eq['psimag']) # normalized poloidal flux at each RZ grid point
-        # self.rsep_mid = (((rmax_outboard - self.Raxis)**2) + ((z_outboard - self.eq['zaxis'])**2))**5 # separatrix radius at midplane
+            # Grids
+            self.rgrid = np.linspace(self.eq['rleft'],self.eq['rleft']+self.eq['rdim'],self.eq['nr']) # m, 1D R grid
+            self.zgrid = np.linspace(self.eq['zmid']-self.eq['zdim']/2,self.eq['zmid']+self.eq['zdim']/2,self.eq['nz']) # m, 1D Z grid
+            self.psi_RZ = self.eq['psirz'] # 2D poloidal flux array at each RZ grid point
+            self.psi_RZ_N = (self.psi_RZ - self.eq['psimag']) / (self.eq['psibry'] - self.eq['psimag']) # normalized poloidal flux at each RZ grid point
+            # self.rsep_mid = (((rmax_outboard - self.Raxis)**2) + ((z_outboard - self.eq['zaxis'])**2))**5 # separatrix radius at midplane
+
+        elif mode=='direct': # user provides values already calculated from psin2D
+            # Geometric parameters
+            self.Rmajor = self.eq['R_geo']
+            self.a = self.eq['r_minor']
+            delta_u = self.eq['delta_upper']
+            delta_l = self.eq['delta_lower']
+            self.delta = (delta_u + delta_l) / 2 # dimensionless, total triangularity
+            if abs(self.delta - self.eq['delta_average']) > 1e-5:
+                raise ValueError("something is wrong with the triangularity input")
+            self.kappa = self.eq['kappa']
+
+            # Plasma parameters (skip the magnetic axis to avoid degenerate zero-area/volume flux surface)
+            self.Ip = self.eq['ip'] # MA, Plasma current
+            self.psi_pres = np.linspace(self.eq['psimag'], self.eq['psibry'], len(self.eq['pres']))[1:]
+            self.psi_N_pres = (self.psi_pres - self.eq['psimag']) / (self.eq['psibry'] - self.eq['psimag'])
+            # self.pres_gfile = self.eq['pres'][1:] # pressure is NOT an input to this model but using this for plotting - want to use pfile pressure instead
 
         self.plasma_surface_area_and_volume()
 

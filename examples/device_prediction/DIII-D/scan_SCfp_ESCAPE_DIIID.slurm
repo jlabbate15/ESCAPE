@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=ARC_SCfp_ESCAPE
+#SBATCH --job-name=DIII-D_SCfp_ESCAPE_3Dfiredrakeinner
 #SBATCH --partition=LocalQ
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --time=14:00:00
-#SBATCH --output=ARC_param_scan%j.out
-#SBATCH --error=ARC_param_scan%j.err
-#SBATCH --chdir=/mnt/homes_global/jal2351/software/saarelma-conner-ped/examples/device_prediction/ARC/fp_scans
+#SBATCH --time=24:00:00
+#SBATCH --output=DIII-D_scan%j.out
+#SBATCH --error=DIII-D_scan%j.err
+#SBATCH --chdir=/mnt/homes_global/jal2351/software/ESCAPE/examples/device_prediction/DIII-D
 
 set -euo pipefail
 
@@ -25,6 +25,6 @@ echo "Working directory: $(pwd)"
 echo "Python: $(which python)"
 python --version
 
-python scan_SCfp_ESCAPE.py
+python scan_SCfp_ESCAPE_DIIID.py
 
 echo "Job finished at $(date)"
