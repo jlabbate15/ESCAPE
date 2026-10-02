@@ -8,11 +8,16 @@ measurements (n0, ionization, emissivity on ``psi_edge``).
 
 The database does not contain the 2D equilibrium (psi(R,Z), F(psi), boundary)
 that ESCAPE_state needs; those come from the per-entry g-files in
-``EQDSK_DIR`` (``sc_inputs/Jamie_inputs``), saved as ``{shot}.{time_ms}.npy``
-pickles of OMFIT ``OMFITgeqdsk`` objects. ``load_gfile`` reads them without
-importing omfit_classes (which needs omas, tqdm, ...) and returns the same
-dict as OpenFUSIONToolkit's ``read_eqdsk``, which is what
+``EQDSK_DIR`` (``sc_inputs/Jamie_inputs_twindow``), saved as
+``{shot}.{time_ms}.npy`` pickles of OMFIT ``OMFITgeqdsk`` objects. ``load_gfile``
+reads them without importing omfit_classes (which needs omas, tqdm, ...) and
+returns the same dict as OpenFUSIONToolkit's ``read_eqdsk``, which is what
 ESCAPE_state.set_equil_params consumes.
+
+Each database entry averages over a 100 ms window [t_min, t_max]; EQDSK_DIR
+holds g-files at both ends (t_min and t_min + 100 ms), which
+``load_equilibrium`` time-averages into one equilibrium (``average_gfiles``).
+If only one g-file of the pair exists, that one is used alone.
 """
 import pickle
 import re
@@ -23,7 +28,7 @@ from numpy.lib import format as npy_format
 from matplotlib.path import Path as MplPath
 
 DB_PATH = Path('/mnt/homes_global/jal2351/software/sc_inputs/Julio_db_for_Saarelma_input_downsampled.pkl')
-EQDSK_DIR = Path('/mnt/homes_global/jal2351/software/sc_inputs/Jamie_inputs')
+EQDSK_DIR = Path('/mnt/homes_global/jal2351/software/sc_inputs/Jamie_inputs_twindow')
 
 
 def load_db(db_path=DB_PATH):
@@ -35,20 +40,20 @@ def load_db(db_path=DB_PATH):
 # ---------------------------------------------------------------------------
 # Equilibrium (pickled OMFITgeqdsk per entry; not in the database)
 # ---------------------------------------------------------------------------
-def find_gfile(entry, eqdsk_dir=EQDSK_DIR):
-    """Path of {shot}.{time_ms}.npy in eqdsk_dir whose time lies in
-    [t_min, t_max] (closest to the window centre), or None if there is none."""
+def find_gfiles(entry, eqdsk_dir=EQDSK_DIR):
+    """Paths of the {shot}.{time_ms}.npy files in eqdsk_dir whose time lies in
+    [t_min, t_max], sorted by time (normally the pair t_min, t_min + 100 ms;
+    may be a single file). Empty list if there are none."""
     if eqdsk_dir is None:
-        return None
+        return []
     shot = int(entry['shot'])
     t_min, t_max = int(entry['t_min']), int(entry['t_max'])
-    t_mid = 0.5 * (t_min + t_max)
     matches = []
     for fp in Path(eqdsk_dir).glob(f'{shot}.*.npy'):
         m = re.fullmatch(rf'{shot}\.(\d+)\.npy', fp.name)
         if m and t_min <= int(m.group(1)) <= t_max:
-            matches.append((abs(int(m.group(1)) - t_mid), fp))
-    return min(matches)[1] if matches else None
+            matches.append((int(m.group(1)), fp))
+    return [fp for _, fp in sorted(matches)]
 
 
 class _OMFITStub(dict):
@@ -113,6 +118,69 @@ def load_gfile(fp):
     return eq
 
 
+def _resample_boundary(rz, n_seg):
+    """Closed boundary -> 4*n_seg points: the four arcs between its
+    outboard (max R), top (max Z), inboard (min R) and bottom (min Z)
+    points, each resampled to n_seg points uniform in arc length. These
+    extreme points (incl. the X-point) land on the same indices in every
+    resampled boundary, so averaging boundaries pointwise keeps them sharp
+    and the averaged R, a, kappa, delta are the averages of each file's."""
+    if np.allclose(rz[0], rz[-1]):
+        rz = rz[:-1]
+    i0 = np.argmax(rz[:, 0])
+    rz = np.roll(rz, -i0, axis=0)  # start at the outboard point
+    if np.argmax(rz[:, 1]) > np.argmin(rz[:, 1]):
+        rz = np.vstack([rz[:1], rz[:0:-1]])  # orient counter-clockwise: outboard -> top -> inboard -> bottom
+    rz = np.vstack([rz, rz[:1]])
+    knots = [0, np.argmax(rz[:, 1]), np.argmin(rz[:, 0]), np.argmin(rz[:, 1]), len(rz) - 1]
+    arcs = []
+    for a, b in zip(knots[:-1], knots[1:]):
+        seg = rz[a:b + 1]
+        s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(seg, axis=0).T))])
+        su = np.linspace(0.0, s[-1], n_seg + 1)[:-1]  # next arc supplies the end point
+        arcs.append(np.column_stack([np.interp(su, s, seg[:, 0]), np.interp(su, s, seg[:, 1])]))
+    return np.vstack(arcs)
+
+
+def average_gfiles(eqs):
+    """Time-average read_eqdsk-style dicts from the same shot: every scalar
+    and profile/psirz array is averaged. The boundaries (rzout) have
+    different point counts,
+    so each is resampled by arc length between its extreme points
+    (_resample_boundary) before averaging. A single dict is returned
+    unchanged."""
+    if len(eqs) == 1:
+        return eqs[0]
+    ref = eqs[0]
+    for e in eqs[1:]:
+        for key in ('nr', 'nz', 'rdim', 'zdim', 'rleft', 'zmid', 'rcentr'):
+            if not np.isclose(e[key], ref[key]):
+                raise ValueError(f"cannot average g-files with different grids ({key}: {ref[key]} vs {e[key]})")
+        for key in ('fpol', 'pres', 'ffprim', 'pprime', 'psirz', 'qpsi'):
+            if e[key].shape != ref[key].shape:
+                raise ValueError(f"cannot average g-files with different {key} shapes "
+                                 f"({ref[key].shape} vs {e[key].shape})")
+
+    eq = dict(ref)
+    for key in ('raxis', 'zaxis', 'psimag', 'psibry', 'bcentr', 'ip'):
+        eq[key] = float(np.mean([e[key] for e in eqs]))
+    for key in ('fpol', 'pres', 'ffprim', 'pprime', 'psirz', 'qpsi'):
+        eq[key] = np.mean([e[key] for e in eqs], axis=0)
+
+    n_seg = -(-max(len(e['rzout']) for e in eqs) // 4)
+    rzout = np.mean([_resample_boundary(e['rzout'], n_seg) for e in eqs], axis=0)
+    eq['rzout'] = np.vstack([rzout, rzout[:1]])  # closed, like EFIT's RBBBS/ZBBBS
+    if all(e['rzlim'].shape == ref['rzlim'].shape for e in eqs):
+        eq['rzlim'] = np.mean([e['rzlim'] for e in eqs], axis=0)  # identical within a shot in practice
+    eq['nbbs'], eq['nlim'] = len(eq['rzout']), len(eq['rzlim'])
+
+    # case string carries the mean time, which gfile_scalars/check_gfile read
+    times = [gfile_scalars(e)['time'] for e in eqs]
+    if None not in times:
+        eq['case'] = re.sub(r'\d+(\s*ms)', f'{round(np.mean(times))}\\1', ref['case'], count=1)
+    return eq
+
+
 # Allowed g-file vs database differences. Measured over all 55 entries:
 # Ip <= 1.6%; |Bt| database/BCENTR = 1.021-1.033 (BCENTR is at RCENTR = 1.6955 m,
 # the database bt evidently at another radius/signal); R_geo, r_minor <= 2 mm;
@@ -173,21 +241,34 @@ def check_gfile(eq, entry, tol=CHECK_TOL):
 
 
 def load_equilibrium(entry, eqdsk_dir=EQDSK_DIR, strict=True):
-    """Find, load and check the g-file for a database entry. Returns
-    (path, read_eqdsk-style dict). Raises FileNotFoundError if there is no
-    g-file and, when strict, ValueError if it disagrees with the database."""
-    fp = find_gfile(entry, eqdsk_dir)
-    if fp is None:
+    """Find, load, time-average and check the g-files for a database entry
+    (the pair at t_min and t_min + 100 ms, or the single one present).
+    Returns (list of paths, read_eqdsk-style dict). Raises FileNotFoundError
+    if there is no g-file and ValueError if a g-file is from another shot
+    or, when strict, the averaged equilibrium disagrees with the database."""
+    fps = find_gfiles(entry, eqdsk_dir)
+    if not fps:
         raise FileNotFoundError(f"no g-file for shot {int(entry['shot'])}, "
                                 f"{int(entry['t_min'])}-{int(entry['t_max'])} ms in {eqdsk_dir}")
-    eq = load_gfile(fp)
+    eqs = [load_gfile(fp) for fp in fps]
+    issues = []
+    if len(eqs) > 1:
+        # shot of each file (the average's case string is the first file's)
+        for fp, e in zip(fps, eqs):
+            g = gfile_scalars(e)
+            if g['shot'] != int(entry['shot']):
+                issues.append(f"{fp.name}: shot {g['shot']} != database {int(entry['shot'])}")
+        if issues:
+            raise ValueError('g-files disagree with the database: ' + '; '.join(issues))
+    eq = average_gfiles(eqs)
     issues = check_gfile(eq, entry)
+    names = '+'.join(fp.name for fp in fps)
     if issues:
-        msg = f'{fp.name} disagrees with the database: ' + '; '.join(issues)
+        msg = f'{names} disagrees with the database: ' + '; '.join(issues)
         if strict:
             raise ValueError(msg)
         print(f'  WARNING: {msg}')
-    return fp, eq
+    return fps, eq
 
 
 # ---------------------------------------------------------------------------
@@ -264,8 +345,10 @@ if __name__ == '__main__':
         kp = build_kprof(entry)
         z = float(entry['Zeff'])
         try:
-            fp, eq = load_equilibrium(entry, args.eqdsk_dir)
-            status = f'{fp.name} OK'
+            fps, eq = load_equilibrium(entry, args.eqdsk_dir)
+            status = f"{'+'.join(fp.name for fp in fps)} OK"
+            if len(fps) == 1:
+                status += ' (no +100 ms partner, not averaged)'
         except (FileNotFoundError, ValueError) as e:
             bad[tag] = str(e)
             status = f'FAILED: {e}'

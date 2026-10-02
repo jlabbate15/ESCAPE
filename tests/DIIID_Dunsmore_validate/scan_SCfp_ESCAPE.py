@@ -38,8 +38,9 @@ Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 # Equilibria: the Dunsmore/Saarelma database carries kinetic profiles and
 # scalars but no 2D equilibrium, so ESCAPE's g-files come from EQDSK_DIR
-# (sc_inputs/Jamie_inputs: {shot}.{time_ms}.npy pickled OMFITgeqdsk objects,
-# time inside the entry's t_min-t_max). load_equilibrium checks each g-file
+# (sc_inputs/Jamie_inputs_twindow: {shot}.{time_ms}.npy pickled OMFITgeqdsk
+# objects at t_min and t_min + 100 ms of the entry's window, time-averaged
+# into one equilibrium; a lone g-file is used as is). load_equilibrium checks it
 # against the database (shot, time, Ip, Bt, R, a, kappa, delta, q95; see
 # CHECK_TOL in parse_dunsmore_db.py); entries without a consistent g-file
 # are skipped and listed.
@@ -53,7 +54,7 @@ else:
 equilibria, skipped = {}, {}
 for tag in equil_tags:
     try:
-        equilibria[tag] = load_equilibrium(db[tag], EQDSK_DIR) # (g-file path, read_eqdsk-style dict)
+        equilibria[tag] = load_equilibrium(db[tag], EQDSK_DIR) # (g-file paths, time-averaged read_eqdsk-style dict)
     except (FileNotFoundError, ValueError) as e:
         skipped[tag] = str(e)
 equil_tags = [tag for tag in equil_tags if tag in equilibria]
@@ -69,7 +70,7 @@ if equil_num == 0:
 # ── Heating power ────────────────────────────────────────────────────────────
 # Unlike the HighPerfHMode set, this database has per-shot powers (MW):
 # ptot = pinj + pech + pohm, pnet = ptot - prad.
-P_HEAT_KEY = 'ptot'     # total (NBI + ECH + Ohmic) heating
+P_HEAT_KEY = 'pnet'     # net (NBI + ECH + Ohmic - radiated) heating, assumes dE/dt of plasma is small (since we already assume steady-state)
 ELECTRON_FRAC = 0.5     # Saarelma et al. take ~half the heating as the electron channel
 
 
@@ -188,7 +189,7 @@ for equil_tag in equil_tags:
 
     # ESCAPE_state inputs, plus the same profiles in calc_pressure_profile form
     # so out_dict['profiles'] and the experimental pedestal pressure match them.
-    mhd_fp, equil_params = equilibria[equil_tag] # g-file path, read_eqdsk-style dict
+    mhd_fps, equil_params = equilibria[equil_tag] # g-file paths, time-averaged read_eqdsk-style dict
     kprof_params = build_kprof(entry)
     profiles = kprof_to_profiles(kprof_params)
     psi_N_p, p_Pa, p_mode = calc_pressure_profile(profiles)
@@ -256,7 +257,7 @@ for equil_tag in equil_tags:
                 # Save model output
                 out_dict = {
                     'equil_tag': equil_tag,
-                    'mhd_fp': str(mhd_fp),
+                    'mhd_fp': ','.join(str(fp) for fp in mhd_fps),
                     'db_path': str(DB_PATH),
                     'profiles': profiles,
                     'ESCAPE_ped_h': ped_h_out, # Pa

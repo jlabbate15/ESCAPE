@@ -1110,7 +1110,8 @@ class SaarelmaConnorBase:
 
     #: Arguments of ``solve_coupled_nondim`` that only its scipy backend
     #: reads (the Firedrake path never touches them).
-    _SCIPY_ONLY_3D_KWARGS = frozenset({'bvp_tol', 'bvp_max_nodes', 'ne_floor'})
+    _SCIPY_ONLY_3D_KWARGS = frozenset({'bvp_tol', 'bvp_max_nodes', 'ivp_method',
+                                       'ivp_rtol', 'ivp_atol', 'ne_floor'})
 
     def _solve_signature_owners(self, model, backend=None):
         """Methods whose signatures define the kwargs accepted by `model`.

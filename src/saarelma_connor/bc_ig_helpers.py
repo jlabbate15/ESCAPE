@@ -80,8 +80,9 @@ a boundary condition, so it is resolved separately by
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.integrate import cumulative_trapezoid
+from scipy.integrate import cumulative_trapezoid, solve_ivp
 from scipy.interpolate import interp1d
+from scipy.optimize import OptimizeResult
 
 __all__ = [
     "NE_BC_LOCS",
@@ -90,6 +91,7 @@ __all__ = [
     "resolve_ne_bcs",
     "build_ne_initial_guess",
     "resolve_integration_constant",
+    "integrate_from_separatrix",
 ]
 
 #: The only two supported n_e boundary-condition pathways.
@@ -554,3 +556,49 @@ def reject_legacy_ne_inner_bc(ne_inner_bc):
             f"pathway with ne_grad_bc_loc."
         )
     return val
+
+
+def integrate_from_separatrix(fun, y0, x_grid, method="Radau",
+                              rtol=1e-8, atol=1e-10, positive_index=0):
+    """Solve the ``"outer"`` pathway as an initial value problem.
+
+    In ``"outer"`` mode every condition sits at the separatrix, so the
+    problem is an IVP, not a BVP: integrate ``Y' = fun(x, Y)`` with
+    ``scipy.integrate.solve_ivp`` from ``Y(x_grid[-1]) = y0`` (the
+    separatrix) inward to ``x_grid[0]`` (the inner boundary).
+
+    ``fun`` uses the ``solve_bvp`` calling convention (vectorised: ``Y``
+    of shape (n, k), returns (n, k)), so the same right-hand side serves
+    both pathways.  Integration stops, and the solve is reported as
+    failed, if component ``positive_index`` (n_e) reaches zero.
+
+    Returns an ``OptimizeResult`` carrying the ``solve_bvp`` fields the
+    solvers read -- ``x`` (ascending: ``x_grid`` plus the integrator's
+    own steps), ``y``, ``sol``, ``success``, ``message``, ``status`` --
+    so downstream code is pathway-agnostic.
+    """
+    x_grid = np.asarray(x_grid, dtype=float)
+
+    def _hit_zero(t, y):
+        return y[positive_index]
+    _hit_zero.terminal = True
+    _hit_zero.direction = -1        # positive -> zero as x decreases
+
+    ivp = solve_ivp(fun, (x_grid[-1], x_grid[0]), np.asarray(y0, dtype=float),
+                    method=method, rtol=rtol, atol=atol,
+                    dense_output=True, vectorized=True, events=_hit_zero)
+
+    if ivp.status == 0:
+        x = np.union1d(x_grid, ivp.t)
+        return OptimizeResult(x=x, y=ivp.sol(x), sol=ivp.sol, success=True,
+                              status=0, message=ivp.message, nfev=ivp.nfev)
+
+    if ivp.status == 1:
+        msg = (f"n_e reached zero at x = {ivp.t_events[0][0]:.4e} "
+               f"(solver units) while integrating from the separatrix "
+               f"towards the inner boundary at x = {x_grid[0]:.4e}")
+    else:
+        msg = ivp.message
+    return OptimizeResult(x=ivp.t[::-1], y=ivp.y[:, ::-1], sol=ivp.sol,
+                          success=False, status=ivp.status, message=msg,
+                          nfev=ivp.nfev)

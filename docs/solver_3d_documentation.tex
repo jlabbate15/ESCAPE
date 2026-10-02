@@ -154,9 +154,12 @@ enlarging the mixed space by a real-space multiplier) leaves the function
 space, the Picard loop and the analytic-neutral path untouched. Diagnostics
 land in \code{self.grad_bc_info}.
 
-The scipy discretisation needs no shooting: \code{solve_bvp} only needs
-the right \emph{number} of residuals and does not care which end they are
-evaluated at.
+The scipy discretisation needs no shooting: with every condition at the
+separatrix, the \code{"outer"} problem is an initial value problem, not a
+boundary value problem, so it is integrated inward from $\h x=0$ to
+$\h x=-1$ with \code{solve_ivp}
+(\code{bc_ig_helpers.integrate_from_separatrix}); \code{solve_bvp} is
+used only in \code{"inner"} mode.
 
 Boundary-condition resolution and initial guesses live in
 \code{src/bc_ig_helpers.py} so the 1D/3D $\times$ Firedrake/scipy solvers
@@ -456,7 +459,9 @@ two discretisations see the same coefficient reconstruction.
 \subsection{\code{solve_coupled_nondim_scipy(...)}}
 \label{sec:scipy}
 %---------------------------------------------------------------------
-scipy (\code{solve_bvp}) solver for the coupled three-equation model. Same
+scipy solver for the coupled three-equation model (\code{solve_bvp}
+collocation in \code{"inner"} mode, \code{solve_ivp} in \code{"outer"}
+mode). Same
 physics, non-dimensionalisation and boundary conditions as
 \code{solve_coupled_nondim}, discretised by collocation instead of finite
 elements. Reached through
@@ -494,8 +499,12 @@ intact, as in the Firedrake weak form.
 Firedrake path (Section~\ref{sec:bcs}): $\hne(0)$, $U(0)$ and $W(0)$ are
 pinned at the separatrix; the fourth is $\Phi(0) = \h f(0,\hne(0))\,\hne'_{bc}$
 in \code{"outer"} mode or $\Phi(-1) = \h f(-1,\hne(-1))\,\hne'_{bc}$ in
-\code{"inner"} mode. \code{solve_bvp} only needs the right \emph{number}
-of residuals, so \code{"outer"} needs no shooting here.
+\code{"inner"} mode. In \code{"outer"} mode all four values are known at
+$\h x=0$, so $Y(0)=[\hne(0),\ \h f(0,\hne(0))\,\hne'_{bc},\ U(0),\ W(0)]$
+is integrated inward to $\h x=-1$ with \code{solve_ivp}
+(\code{bc_ig_helpers.integrate_from_separatrix}); integration stops and is
+reported as a failure if $\hne$ reaches zero. \code{solve_bvp} is used
+only in \code{"inner"} mode.
 
 \paragraph{Initial guess.} $n_e$ comes from
 \code{bc_ig_helpers.build_ne_initial_guess} (\code{initial_guess},
@@ -596,7 +605,11 @@ automatic inner-boundary search is no longer offered).
   \item[\code{nFC_ic}, \code{nCX_ic}] Neutral initial-guess options (see
   Section~\ref{sec:scipy}).
   \item[\code{bvp_tol}, \code{bvp_max_nodes}] \code{solve_bvp} controls,
-  used only by \code{solver_structure="scipy"}.
+  used only by \code{solver_structure="scipy"} in \code{"inner"} mode.
+  \item[\code{ivp_method}, \code{ivp_rtol}, \code{ivp_atol}]
+  \code{solve_ivp} controls (default \code{"Radau"}, $10^{-8}$,
+  $10^{-10}$), used only by \code{solver_structure="scipy"} in
+  \code{"outer"} mode.
   \item[\code{ne_floor} (float)] Lower clip on $\hne$ keeping
   $\h C_{\mathrm{ETG}}/\hne$ finite in the scipy driver.
   \item[\code{verbose} (bool or None)] Override \code{self.verbose}.

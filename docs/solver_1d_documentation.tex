@@ -272,8 +272,8 @@ pedestal-top slope (or \code{dne_dx_neginf} if given), because it is a
 model constant rather than a boundary condition.
 
 \paragraph{Implementation.} \code{solve_sc_scipy} imposes the
-\code{"outer"} pair directly (\code{solve_bvp} accepts both residuals at one
-end). \code{solve_sc_firedrake} cannot: the strong Dirichlet condition at
+\code{"outer"} pair directly as initial data $N(0)=1$, $N'(0)=N'_{bc}$ and
+integrates inward with \code{solve_ivp}. \code{solve_sc_firedrake} cannot: the strong Dirichlet condition at
 boundary id 2 makes $w(0)=0$, so a \code{ds(2)} flux term vanishes
 identically. There the equivalent well-posed statement --- the inner flux
 is an unknown fixed by the separatrix gradient --- is solved by secant
@@ -493,7 +493,8 @@ $\alpha_{\mathrm{crit}}$ away from $\bar\alpha$ --- is different from
 \subsection{\code{solve_sc_scipy(...)}}
 \label{sec:scipy}
 %---------------------------------------------------------------------
-Implicit scipy (\code{solve_bvp}) solver for the original model. Step 1
+Implicit scipy solver for the original model (\code{solve_bvp} in
+\code{"inner"} mode, \code{solve_ivp} in \code{"outer"} mode). Step 1
 solves the non-dimensional no-CX equation (report Eq.~6) for a first $n_e$;
 step 2 Picard-iterates the full equation (report Eq.~7) with the
 exponential kernel $E(x)$ and the pedestal-averaged KBM diffusivity frozen
@@ -542,9 +543,15 @@ changing.
   on the change in $n_e$ between Picard iterations.
   \item[{\code{picard_relax} (float in $(0,1]$)}] Under-relaxation of the
   frozen $D_{\mathrm{KBM}}$ and $E(x)$ updates.
-  \item[\code{bvp_tol} (float)] \code{solve_bvp} residual tolerance.
+  \item[\code{bvp_tol} (float)] \code{solve_bvp} residual tolerance
+  (\code{"inner"} mode only).
   \item[\code{bvp_max_nodes} (int)] \code{solve_bvp} maximum number of mesh
-  nodes.
+  nodes (\code{"inner"} mode only).
+  \item[\code{ivp_method} (str, \code{"Radau"})] \code{solve_ivp}
+  integrator (\code{"outer"} mode only).
+  \item[\code{ivp_rtol}, \code{ivp_atol} (float, $10^{-8}$, $10^{-10}$)]
+  \code{solve_ivp} relative / absolute tolerances (\code{"outer"} mode
+  only).
   \item[\code{reuse_setup} (bool)] Reuse cached solver grids / form
   factors when the resolution is unchanged (set \code{False} after
   changing the equilibrium).
@@ -578,9 +585,11 @@ $N\le0$ cannot produce a division by zero.
 
 \paragraph{Boundary residuals.} In \code{"inner"} mode:
 $Y_a[1]-N'_{bc}$ (Neumann at $\xi=-1$) and $Y_b[0]-1$ (Dirichlet at
-$\xi=0$). In \code{"outer"} mode both residuals sit at $\xi=0$:
-$Y_b[0]-1$ and $Y_b[1]-N'_{bc}$. \code{solve_bvp} only needs the right
-\emph{number} of residuals, so this needs no shooting.
+$\xi=0$). In \code{"outer"} mode both conditions sit at $\xi=0$, so there are no
+residuals: $Y(0)=[1,\,N'_{bc}]$ is the initial value of an IVP integrated
+inward to $\xi=-1$ by \code{solve_ivp} (dense output on the uniform grid
+plus the integrator's own steps). Integration stops and is reported as a
+failure if $N$ reaches zero.
 
 \paragraph{Step 1 details.} $D_{\mathrm{KBM}}$ is frozen from the initial
 guess. A ``converged'' step-1 profile with $\min N\le0$ is rejected: Eq.~6
@@ -592,7 +601,8 @@ uniform grid.
 \paragraph{Step 2 details.} Each iteration refreezes $E(x)$ and
 $D_{\mathrm{KBM}}$ (averaged-$\alpha$ gate) from the previous iterate with
 optional under-relaxation, warm-starts \code{solve_bvp} from the previous
-iterate on the uniform grid, and checks convergence on the relative
+iterate on the uniform grid (\code{"inner"} mode; the \code{"outer"} IVP
+needs no guess), and checks convergence on the relative
 max-norm change of $n_e$ together with a stable gate state.
 
 %---------------------------------------------------------------------

@@ -417,12 +417,19 @@ class OneDSolverMixin:
                        picard_relax=1.0,
                        bvp_tol=1e-6,
                        bvp_max_nodes=5000,
+                       ivp_method="Radau",
+                       ivp_rtol=1e-8,
+                       ivp_atol=1e-10,
                        reuse_setup=True,
                        verbose=None):
-        """Implicit scipy ``solve_bvp`` solver: an Eq. (6) first step, then
-        Picard iteration of Eq. (7) with E(x) and D_KBM frozen from the
-        previous iterate. Parameters are documented in
-        docs/solver_1d_documentation.tex; returns the common result dict.
+        """Implicit scipy solver: an Eq. (6) first step, then Picard
+        iteration of Eq. (7) with E(x) and D_KBM frozen from the previous
+        iterate. ``ne_grad_bc_loc="inner"`` is a BVP solved with
+        ``solve_bvp`` (``bvp_tol``, ``bvp_max_nodes``); ``"outer"`` puts
+        both conditions at the separatrix, so it is an IVP integrated inward
+        with ``solve_ivp`` (``ivp_method``, ``ivp_rtol``, ``ivp_atol``).
+        Parameters are documented in docs/solver_1d_documentation.tex;
+        returns the common result dict.
         """
         v = self.verbose if verbose is None else bool(verbose)
         picard_relax = float(picard_relax)
@@ -510,21 +517,25 @@ class OneDSolverMixin:
             C_N = f1 / (n0 * (N_safe ** 2) * F)
             return x, F, C_K, C_N
 
-        if ne_grad_bc_loc == "inner":
-            def bc(Ya, Yb):
-                return np.array([
-                    Ya[1] - dN_bc,   # Neumann at xi = -1 (inner)
-                    Yb[0] - 1.0,     # Dirichlet at xi = 0: N = ne_x0/n0 = 1
-                ])
-        else:
-            # Both conditions at the separatrix (Saarelma Sec. 2.3); the
-            # inner boundary is left free.  solve_bvp only needs the right
-            # *number* of residuals, so this needs no shooting.
-            def bc(Ya, Yb):
-                return np.array([
-                    Yb[0] - 1.0,     # Dirichlet at xi = 0: N = ne_x0/n0 = 1
-                    Yb[1] - dN_bc,   # Neumann at xi = 0 (separatrix)
-                ])
+        def bc(Ya, Yb):
+            return np.array([
+                Ya[1] - dN_bc,   # Neumann at xi = -1 (inner)
+                Yb[0] - 1.0,     # Dirichlet at xi = 0: N = ne_x0/n0 = 1
+            ])
+
+        def _solve(ode, Y_guess):
+            """Inner Neumann: BVP via solve_bvp.  Outer: both conditions at the
+            separatrix (Saarelma Sec. 2.3), N(0) = 1 and N'(0) = N'_bc, so
+            integrate the IVP inward from xi = 0 with solve_ivp.
+            """
+            if ne_grad_bc_loc == "inner":
+                return solve_bvp(ode, bc, xi_grid, Y_guess,
+                                 tol=bvp_tol, max_nodes=int(bvp_max_nodes),
+                                 verbose=2 if v else 0)
+            return bcig.integrate_from_separatrix(
+                ode, [1.0, dN_bc], xi_grid, method=ivp_method,
+                rtol=ivp_rtol, atol=ivp_atol,
+            )
 
         # --------------------------------------------------------------
         # Step 1: no-CX first step (report Eq. 6 / Saarelma Eq. 16),
@@ -557,9 +568,7 @@ class OneDSolverMixin:
         Y_guess = np.vstack([ne_init / n0, dne_guess * (L / n0)])
         sol = None
         if first_step != "skip":
-            sol = solve_bvp(ode_first, bc, xi_grid, Y_guess,
-                            tol=bvp_tol, max_nodes=int(bvp_max_nodes),
-                            verbose=2 if v else 0)
+            sol = _solve(ode_first, Y_guess)
             err = None
             if not sol.success:
                 err = RuntimeError(sol.message)
@@ -650,17 +659,16 @@ class OneDSolverMixin:
                        - C_K * dN + C_N * dN ** 2)
                 return np.vstack([dN, d2N])
 
-            # Warm start from the previous iterate on the uniform grid.
+            # Warm start from the previous iterate on the uniform grid
+            # (used by solve_bvp only; the IVP needs no guess).
             N_guess = np.interp(x_grid, x_prev, N_prev)
             dN_guess = np.interp(x_grid, x_prev, dN_prev)
-            sol = solve_bvp(ode_full, bc, xi_grid,
-                            np.vstack([N_guess, dN_guess]),
-                            tol=bvp_tol, max_nodes=int(bvp_max_nodes),
-                            verbose=2 if v else 0)
+            sol = _solve(ode_full, np.vstack([N_guess, dN_guess]))
             if not sol.success:
                 raise RuntimeError(
-                    f"[sc scipy] Picard iteration {it} BVP failed: "
-                    f"{sol.message}"
+                    f"[sc scipy] Picard iteration {it} "
+                    f"{'BVP' if ne_grad_bc_loc == 'inner' else 'IVP'} "
+                    f"failed: {sol.message}"
                 )
             x_prev = L * sol.x
             N_prev, dN_prev = sol.y[0], sol.y[1]

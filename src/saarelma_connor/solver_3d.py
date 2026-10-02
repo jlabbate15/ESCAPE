@@ -579,7 +579,7 @@ class ThreeDSolverMixin:
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # scipy (solve_bvp) implementation of the coupled three-equation model
+    # scipy (solve_bvp / solve_ivp) implementation of the coupled model
     # ------------------------------------------------------------------
 
     def _scipy_coefficients_nondim(self):
@@ -622,13 +622,20 @@ class ThreeDSolverMixin:
                                    picard_relax=1.0,
                                    bvp_tol=1e-6,
                                    bvp_max_nodes=50000,
+                                   ivp_method="Radau",
+                                   ivp_rtol=1e-8,
+                                   ivp_atol=1e-10,
                                    reuse_setup=True,
                                    ne_floor=1e-8,
                                    verbose=None):
-        """scipy ``solve_bvp`` collocation solver for the coupled model, with
-        state Y = [hat_n_e, Phi, U, W] and a Picard loop on D_KBM. Details are
-        in docs/solver_3d_documentation.tex; returns the common result dict in
-        SI.
+        """scipy solver for the coupled model, with state
+        Y = [hat_n_e, Phi, U, W] and a Picard loop on D_KBM.
+        ``ne_grad_bc_loc="inner"`` is a BVP solved by ``solve_bvp``
+        collocation (``bvp_tol``, ``bvp_max_nodes``); ``"outer"`` puts all
+        four conditions at the separatrix, so it is an IVP integrated inward
+        with ``solve_ivp`` (``ivp_method``, ``ivp_rtol``, ``ivp_atol``).
+        Details are in docs/solver_3d_documentation.tex; returns the common
+        result dict in SI.
         """
         v = self.verbose if verbose is None else bool(verbose)
         force_setup = not reuse_setup
@@ -753,19 +760,32 @@ class ThreeDSolverMixin:
         W_x0 = hat_nCX_x0 * Vcx0 * fCX0 * g0
 
         def bc(Ya, Yb):
-            # Yb is the separatrix (hat_x = 0), Ya the inner boundary (-1).
-            res = [Yb[0] - hat_ne_x0,      # n_e(0)   = ne_x0
-                   Yb[2] - U_x0,           # n_FC(0)  = nFC_x0
-                   Yb[3] - W_x0]           # n_CX(0)  = nCX_x0
-            if ne_grad_bc_loc == "outer":
-                # Fourth condition also at the separatrix: n_e'(0) prescribed,
-                # i.e. Phi(0) = hat_f(0, n_e(0)) * hat_dne_dx_bc.
-                f0 = conductance(0.0, max(Yb[0], ne_floor), float(D_KBM_x(0.0)))
-                res.append(Yb[1] - f0 * hat_dne_dx_bc)
-            else:                                   # Neumann at the inner end
-                fin = conductance(-1.0, max(Ya[0], ne_floor), float(D_KBM_x(-1.0)))
-                res.append(Ya[1] - fin * hat_dne_dx_bc)
-            return np.array(res)
+            # "inner" pathway only.  Yb is the separatrix (hat_x = 0), Ya the
+            # inner boundary (-1).
+            fin = conductance(-1.0, max(Ya[0], ne_floor), float(D_KBM_x(-1.0)))
+            return np.array([
+                Yb[0] - hat_ne_x0,              # n_e(0)   = ne_x0
+                Yb[2] - U_x0,                   # n_FC(0)  = nFC_x0
+                Yb[3] - W_x0,                   # n_CX(0)  = nCX_x0
+                Ya[1] - fin * hat_dne_dx_bc,    # Neumann at the inner end
+            ])
+
+        def _solve(Y_start):
+            """Inner Neumann: BVP via solve_bvp.  Outer: all four conditions
+            at the separatrix, n_e'(0) entering as
+            Phi(0) = hat_f(0, n_e(0)) * hat_dne_dx_bc, so integrate the IVP
+            inward from hat_x = 0 with solve_ivp.
+            """
+            if ne_grad_bc_loc == "inner":
+                return solve_bvp(ode, bc, hat_x, Y_start,
+                                 tol=bvp_tol, max_nodes=int(bvp_max_nodes),
+                                 verbose=0)
+            f0 = conductance(0.0, max(hat_ne_x0, ne_floor), float(D_KBM_x(0.0)))
+            Y0 = [hat_ne_x0, f0 * hat_dne_dx_bc, U_x0, W_x0]
+            return bcig.integrate_from_separatrix(
+                ode, Y0, hat_x, method=ivp_method,
+                rtol=ivp_rtol, atol=ivp_atol,
+            )
 
         # ---- Picard loop on the frozen KBM diffusivity --------------------
         picard_history = []
@@ -780,15 +800,15 @@ class ThreeDSolverMixin:
             D_KBM_x = interp1d(hat_x, hat_D_KBM, kind='linear',
                                bounds_error=False, fill_value='extrapolate')
 
+            # Warm start (used by solve_bvp only; the IVP needs no guess).
             Y_start = np.vstack([np.interp(hat_x, x_prev, Y_prev[k])
                                  for k in range(4)])
-            sol = solve_bvp(ode, bc, hat_x, Y_start,
-                            tol=bvp_tol, max_nodes=int(bvp_max_nodes),
-                            verbose=0)
+            sol = _solve(Y_start)
             if not sol.success:
                 raise RuntimeError(
-                    f"[nondim scipy] Picard iteration {it} BVP failed: "
-                    f"{sol.message}"
+                    f"[nondim scipy] Picard iteration {it} "
+                    f"{'BVP' if ne_grad_bc_loc == 'inner' else 'IVP'} "
+                    f"failed: {sol.message}"
                 )
 
             N_new = np.interp(hat_x, sol.x, sol.y[0])
@@ -913,6 +933,9 @@ class ThreeDSolverMixin:
                       n_neutral_sub=4001,
                       bvp_tol=1e-6,
                       bvp_max_nodes=50000,
+                      ivp_method="Radau",
+                      ivp_rtol=1e-8,
+                      ivp_atol=1e-10,
                       ne_floor=1e-8,
                       verbose=None):
         """Non-dimensional coupled three-equation solver (Firedrake, or scipy
@@ -951,6 +974,9 @@ class ThreeDSolverMixin:
                 picard_relax=picard_relax,
                 bvp_tol=bvp_tol,
                 bvp_max_nodes=bvp_max_nodes,
+                ivp_method=ivp_method,
+                ivp_rtol=ivp_rtol,
+                ivp_atol=ivp_atol,
                 reuse_setup=reuse_setup,
                 ne_floor=ne_floor,
                 verbose=verbose,
