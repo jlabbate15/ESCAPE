@@ -47,14 +47,35 @@ The Dirichlet value is ``state.ne_x0`` in both pathways; only the
 
 Where the values come from
 ==========================
-By default, from the kinetic profile the state holds, ``state.n_e`` (on
-``state.psi_ne_eval``), interpolated onto the solver's ``x_init`` grid at
-the moment the boundary conditions are resolved.  Each value can instead
-be supplied explicitly -- ``dne_dx_bc`` (the Neumann value at the location
-``ne_bc_loc`` selects), ``ne_inner`` (the pedestal-top density for the
-initial guess) and ``dne_dx_neginf`` (the integration constant below) --
-in which case it is used as given; any left as None falls back to
-``state.n_e``.  The Dirichlet value is always ``state.ne_x0``.
+The Neumann value is selected by ``dne_method``:
+
+``"state"`` (default)
+    read off the kinetic profile the state holds, ``state.n_e`` (on
+    ``state.psi_ne_eval``), interpolated onto the solver's ``x_init``
+    grid at the moment the boundary conditions are resolved;
+
+``"user"``
+    ``dne_dx_bc`` (m^-4), used as given at the location ``ne_bc_loc``
+    selects;
+
+``"Saarelma2023"``  (``ne_bc_loc="outer"`` only)
+    Saarelma et al. 2023 Eq. (20), the separatrix gradient of an
+    exponential SOL with decay length sqrt(D_SOL tau_par)::
+
+        dn_e/dx|_0 = -n_e(0) / sqrt(D_SOL tau_par)
+
+    with ``tau_par`` (s) supplied by the caller and D_SOL = D_ped(0) =
+    D_NEO(0) + D_KBM(0) + C_ETG(0)/n_e(0).  D_KBM needs the n_e initial
+    guess, which needs these boundary conditions, so
+    :func:`resolve_ne_bcs` leaves this value pending and the solver fills
+    it in with :func:`resolve_saarelma2023_neumann` once its
+    initial-guess D_KBM exists.  It is computed once, before the KBM
+    Picard loop, and stays frozen for the whole solve.
+
+``ne_inner`` (the pedestal-top density for the initial guess) and
+``dne_dx_neginf`` (the integration constant below) are used as given
+when supplied and otherwise fall back to ``state.n_e``.  The Dirichlet
+value is always ``state.ne_x0``.
 
 Only what was asked for is looked up
 ====================================
@@ -86,9 +107,12 @@ from scipy.optimize import OptimizeResult
 
 __all__ = [
     "NE_BC_LOCS",
+    "NE_DNE_METHODS",
     "NeBCs",
     "check_ne_bc_loc",
+    "check_dne_method",
     "resolve_ne_bcs",
+    "resolve_saarelma2023_neumann",
     "build_ne_initial_guess",
     "resolve_integration_constant",
     "integrate_from_separatrix",
@@ -97,9 +121,13 @@ __all__ = [
 #: The only two supported n_e boundary-condition pathways.
 NE_BC_LOCS = ("inner", "outer")
 
+#: The supported ways of setting the Neumann value (``dne_method``).
+NE_DNE_METHODS = ("user", "state", "Saarelma2023")
+
 #: Labels recorded in ``NeBCs.origin`` / ``NeBCs.ne_inner_origin``.
 _PROFILE_ORIGIN = "state.n_e profile"
 _USER_ORIGIN = "user-specified"
+_SAARELMA_ORIGIN = "Saarelma 2023 Eq. (20)"
 
 
 @dataclass
@@ -114,8 +142,9 @@ class NeBCs:
         Inner-boundary position (m, < 0; the separatrix is x = 0).
     ne_outer : float
         Dirichlet value n_e(0) (m^-3).  Always at the separatrix.
-    dne_dx : float
-        Neumann value dn_e/dx (m^-4) at :attr:`x_neumann`.
+    dne_dx : float or None
+        Neumann value dn_e/dx (m^-4) at :attr:`x_neumann`.  None while a
+        ``"Saarelma2023"`` value is still pending (see :attr:`pending`).
     ne_inner_guess : float
         Pedestal-top density (m^-3) used *only* to shape the initial
         guess.  This is **not** a boundary condition: in the ``"inner"``
@@ -125,6 +154,13 @@ class NeBCs:
         Where ``dne_dx`` came from, for logging.
     ne_inner_origin : str
         Where ``ne_inner_guess`` came from, for logging.
+    method : {"user", "state", "Saarelma2023"}
+        How ``dne_dx`` is set; see the module docstring.
+    tau_par : float or None
+        Parallel loss time (s) of the ``"Saarelma2023"`` method.
+    D_sol : float or None
+        D_SOL = D_ped(0) (m^2/s) used by the ``"Saarelma2023"`` method,
+        set by :func:`resolve_saarelma2023_neumann`.
     """
 
     loc: str
@@ -134,6 +170,14 @@ class NeBCs:
     ne_inner_guess: float
     origin: str = ""
     ne_inner_origin: str = ""
+    method: str = "state"
+    tau_par: float = None
+    D_sol: float = None
+
+    @property
+    def pending(self):
+        """True until a ``"Saarelma2023"`` Neumann value has been filled in."""
+        return self.dne_dx is None
 
     @property
     def x_neumann(self):
@@ -153,12 +197,22 @@ class NeBCs:
     def describe(self, prefix=""):
         """Multi-line summary for a solver's verbose block."""
         where = "x_inner" if self.loc == "inner" else "x = 0"
-        return (
+        dne_dx = ("pending" if self.pending
+                  else f"{self.dne_dx:.3e} m^-4")
+        out = (
             f"{prefix}ne_bc_loc        = {self.loc!r}\n"
             f"{prefix}x_inner          = {self.x_inner:.4e} m\n"
             f"{prefix}n_e(0)           = {self.ne_outer:.3e} m^-3  (Dirichlet)\n"
-            f"{prefix}dne/dx({where:>7}) = {self.dne_dx:.3e} m^-4  "
+            f"{prefix}dne/dx({where:>7}) = {dne_dx}  "
             f"(Neumann, {self.origin})\n"
+        )
+        if self.method == "Saarelma2023":
+            D_sol = ("pending" if self.D_sol is None
+                     else f"{self.D_sol:.3e} m^2/s")
+            out += (f"{prefix}tau_par          = {self.tau_par:.3e} s\n"
+                    f"{prefix}D_SOL = D_ped(0) = {D_sol}  "
+                    f"(frozen from the initial guess)\n")
+        return out + (
             f"{prefix}ne(x_inner)      = {self.ne_inner_guess:.3e} m^-3  "
             f"(initial guess only, {self.ne_inner_origin})"
         )
@@ -184,6 +238,67 @@ def check_ne_bc_loc(ne_bc_loc):
             "no other combination is available."
         )
     return loc
+
+
+def check_dne_method(dne_method, ne_bc_loc, dne_dx_bc=None, tau_par=None):
+    """Validate and normalise the Neumann-value flag ``dne_method``.
+
+    Checks that the method is compatible with the pathway and that exactly
+    the inputs it uses were supplied, so an argument that would otherwise
+    be silently ignored raises instead.
+
+    Raises
+    ------
+    ValueError
+        For an unknown method; ``"Saarelma2023"`` with
+        ``ne_bc_loc="inner"``; ``"user"`` without ``dne_dx_bc``;
+        ``"Saarelma2023"`` without a positive ``tau_par``; or
+        ``dne_dx_bc`` / ``tau_par`` given to a method that does not use it.
+    """
+    lookup = {m.lower(): m for m in NE_DNE_METHODS}
+    method = lookup.get(str(dne_method).lower())
+    if method is None:
+        raise ValueError(
+            f"dne_method must be one of {NE_DNE_METHODS}, got "
+            f"{dne_method!r}."
+        )
+    loc = check_ne_bc_loc(ne_bc_loc)
+
+    if method == "Saarelma2023" and loc != "outer":
+        raise ValueError(
+            "dne_method='Saarelma2023' sets the separatrix gradient, so it "
+            "requires ne_bc_loc='outer' (got 'inner')."
+        )
+    if method == "user" and dne_dx_bc is None:
+        raise ValueError("dne_method='user' requires dne_dx_bc.")
+    if method != "user" and dne_dx_bc is not None:
+        raise ValueError(
+            f"dne_dx_bc is only used by dne_method='user' (got "
+            f"dne_method={method!r}); drop it or set dne_method='user'."
+        )
+    if method == "Saarelma2023":
+        if tau_par is None or not float(tau_par) > 0.0:
+            raise ValueError(
+                "dne_method='Saarelma2023' requires a positive tau_par (s), "
+                f"got {tau_par!r}."
+            )
+    elif tau_par is not None:
+        raise ValueError(
+            f"tau_par is only used by dne_method='Saarelma2023' (got "
+            f"dne_method={method!r})."
+        )
+    return method
+
+
+def _check_negative_slope(loc, dne_dx_val):
+    """Raise unless the Neumann slope is strictly negative."""
+    if not dne_dx_val < 0.0:
+        where = "x_inner" if loc == "inner" else "0"
+        raise ValueError(
+            f"dne/dx({where}) = {dne_dx_val:.3e} m^-4 must be strictly "
+            "negative (density decreasing outward) for the Neumann "
+            "boundary condition."
+        )
 
 
 def _ne_on_x_init(state):
@@ -217,14 +332,20 @@ def _profile_ne_inner(state, x_inner):
     return ne_inner_val
 
 
-def resolve_ne_bcs(state, ne_bc_loc, dne_dx_bc=None, ne_inner=None,
+def resolve_ne_bcs(state, ne_bc_loc, dne_method="state", dne_dx_bc=None,
+                   ne_inner=None, tau_par=None,
                    require_negative_slope=False):
     """Resolve the n_e boundary conditions for one solve.
 
-    Explicit values are used when given; otherwise they are read off
-    ``state.n_e``.  Only the two conditions belonging to ``ne_bc_loc`` are
-    looked up; the gradient at the other end of the domain is never
-    evaluated.
+    The Neumann value is set as ``dne_method`` says; ``ne_inner`` is used
+    when given and otherwise read off ``state.n_e``.  Only the two
+    conditions belonging to ``ne_bc_loc`` are looked up; the gradient at
+    the other end of the domain is never evaluated.
+
+    With ``dne_method="Saarelma2023"`` the returned ``NeBCs`` is
+    :attr:`~NeBCs.pending`: the solver must call
+    :func:`resolve_saarelma2023_neumann` once its initial-guess D_KBM is
+    available, before it uses ``dne_dx``.
 
     Parameters
     ----------
@@ -235,16 +356,19 @@ def resolve_ne_bcs(state, ne_bc_loc, dne_dx_bc=None, ne_inner=None,
         equilibrium/profile setup and after ``find_inner_boundary``).
     ne_bc_loc : {"inner", "outer"}
         Boundary-condition pathway; see the module docstring.
+    dne_method : {"state", "user", "Saarelma2023"}
+        How the Neumann value is set; see the module docstring.
+        ``"Saarelma2023"`` is valid only with ``ne_bc_loc="outer"``.
     dne_dx_bc : float, optional
-        Neumann value dn_e/dx (m^-4), imposed at x_inner for ``"inner"``
-        and at the separatrix for ``"outer"``.  None reads it off
-        ``state.n_e`` at that location.
+        Neumann value dn_e/dx (m^-4) for ``dne_method="user"``, imposed at
+        x_inner for ``"inner"`` and at the separatrix for ``"outer"``.
     ne_inner : float, optional
         Pedestal-top density (m^-3) for the initial guess only.  None reads
         it off ``state.n_e`` at x_inner.
+    tau_par : float, optional
+        Parallel loss time (s) for ``dne_method="Saarelma2023"``.
     require_negative_slope : bool
-        Raise if the resolved slope (user-specified or from the profile)
-        is not strictly negative.  The
+        Raise if the resolved slope is not strictly negative.  The
         original-state solvers set this; the coupled solvers do not.
 
     Returns
@@ -252,6 +376,8 @@ def resolve_ne_bcs(state, ne_bc_loc, dne_dx_bc=None, ne_inner=None,
     NeBCs
     """
     loc = check_ne_bc_loc(ne_bc_loc)
+    method = check_dne_method(dne_method, loc, dne_dx_bc=dne_dx_bc,
+                              tau_par=tau_par)
 
     x_inner = float(state.x_inner)
     if x_inner >= 0.0:
@@ -262,21 +388,22 @@ def resolve_ne_bcs(state, ne_bc_loc, dne_dx_bc=None, ne_inner=None,
     ne_outer = float(state.ne_x0)          # Dirichlet, always at x = 0
 
     # ---- the Neumann value, read only where the pathway puts it -------
-    if dne_dx_bc is not None:
+    if method == "user":
         dne_dx_val = float(dne_dx_bc)
         origin = _USER_ORIGIN
-    else:
+    elif method == "state":
         x_neumann = x_inner if loc == "inner" else 0.0
         dne_dx_val = _profile_gradient_at(state, x_neumann)
         origin = _PROFILE_ORIGIN
+    else:  # "Saarelma2023"
+        # Needs D_SOL = D_ped(0), hence D_KBM, hence the n_e initial guess
+        # built from these very BCs -- so it is left pending here and set
+        # by resolve_saarelma2023_neumann once the solver has D_KBM.
+        dne_dx_val = None
+        origin = _SAARELMA_ORIGIN
 
-    if require_negative_slope and not dne_dx_val < 0.0:
-        where = "x_inner" if loc == "inner" else "0"
-        raise ValueError(
-            f"dne/dx({where}) = {dne_dx_val:.3e} m^-4 must be strictly "
-            "negative (density decreasing outward) for the Neumann "
-            "boundary condition."
-        )
+    if require_negative_slope and dne_dx_val is not None:
+        _check_negative_slope(loc, dne_dx_val)
 
     # ---- pedestal-top density for the initial guess only --------------
     if ne_inner is not None:
@@ -297,7 +424,69 @@ def resolve_ne_bcs(state, ne_bc_loc, dne_dx_bc=None, ne_inner=None,
 
     return NeBCs(loc=loc, x_inner=x_inner, ne_outer=ne_outer,
                  dne_dx=dne_dx_val, ne_inner_guess=ne_inner_guess,
-                 origin=origin, ne_inner_origin=ne_inner_origin)
+                 origin=origin, ne_inner_origin=ne_inner_origin,
+                 method=method,
+                 tau_par=None if tau_par is None else float(tau_par))
+
+
+def resolve_saarelma2023_neumann(state, bcs, x_D_KBM, D_KBM,
+                                 require_negative_slope=False):
+    """Fill in a pending ``dne_method="Saarelma2023"`` Neumann value.
+
+    Saarelma et al. 2023 Eq. (20), the separatrix gradient of an
+    exponential SOL with decay length sqrt(D_SOL tau_par)::
+
+        dn_e/dx|_0 = -n_e(0) / sqrt(D_SOL tau_par),
+        D_SOL = D_ped(0) = D_NEO(0) + D_KBM(0) + C_ETG(0) / n_e(0).
+
+    Solvers call this once, with the D_KBM built from the n_e initial
+    guess and before the KBM Picard loop, so the condition is frozen for
+    the whole solve.  A no-op for the other methods.
+
+    Parameters
+    ----------
+    state : saarelma_connor
+        Supplies ``D_NEO`` and ``C_ETG`` on ``state.x_init``.
+    bcs : NeBCs
+        From :func:`resolve_ne_bcs`; updated in place and returned.
+    x_D_KBM : array_like
+        SI grid (m) on which ``D_KBM`` is given; need not be sorted.
+    D_KBM : array_like
+        KBM diffusivity (m^2/s) on ``x_D_KBM``.
+    require_negative_slope : bool
+        As in :func:`resolve_ne_bcs`.
+    """
+    if bcs.method != "Saarelma2023":
+        return bcs
+
+    x_D_KBM = np.asarray(x_D_KBM, dtype=float)
+    D_KBM = np.asarray(D_KBM, dtype=float)
+    order = np.argsort(x_D_KBM)
+    D_KBM_0 = float(np.interp(0.0, x_D_KBM[order], D_KBM[order]))
+    x_init = np.asarray(state.x_init, dtype=float)
+    D_NEO = np.broadcast_to(np.asarray(state.D_NEO, dtype=float),
+                            x_init.shape)
+    D_NEO_0 = float(np.interp(0.0, x_init, D_NEO))
+    C_ETG_0 = float(np.interp(0.0, x_init, state.C_ETG))
+
+    D_sol = D_NEO_0 + D_KBM_0 + C_ETG_0 / bcs.ne_outer
+    if not (np.isfinite(D_sol) and D_sol > 0.0):
+        raise ValueError(
+            f"D_SOL = D_ped(0) = {D_sol!r} m^2/s (D_NEO = {D_NEO_0:.3e}, "
+            f"D_KBM = {D_KBM_0:.3e}, C_ETG/n_e = "
+            f"{C_ETG_0 / bcs.ne_outer:.3e}) is not positive; cannot form "
+            "the Saarelma 2023 separatrix gradient."
+        )
+
+    dne_dx_val = -bcs.ne_outer / np.sqrt(D_sol * bcs.tau_par)
+    if require_negative_slope:
+        _check_negative_slope(bcs.loc, dne_dx_val)
+
+    bcs.dne_dx = float(dne_dx_val)
+    bcs.D_sol = float(D_sol)
+    state.dne_dx_outer = bcs.dne_dx
+    state.D_sol = bcs.D_sol
+    return bcs
 
 
 def build_ne_initial_guess(state, x_grid, initial_guess, bcs,

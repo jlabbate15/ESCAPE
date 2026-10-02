@@ -316,10 +316,10 @@ def build_kprof(entry):
 def kprof_to_profiles(kprof_params):
     """kprof_params -> the layout calc_pressure_profile expects (p = 2*ne*Te)."""
     return {
-        'psi_N_ne': kprof_params['psin_ne'],
-        'ne': kprof_params['n_e'],  # m^-3
-        'psi_N_Te': kprof_params['psin_Te'],
-        'Te': kprof_params['T_e'],  # keV
+        'psin_ne': kprof_params['psin_ne'],
+        'n_e': kprof_params['n_e'],  # m^-3
+        'psin_Te': kprof_params['psin_Te'],
+        'T_e': kprof_params['T_e'],  # keV
         'units': {'ne': 'm^-3', 'Te': 'keV'},
     }
 

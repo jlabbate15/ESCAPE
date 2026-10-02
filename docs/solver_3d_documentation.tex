@@ -575,11 +575,25 @@ automatic inner-boundary search is no longer offered).
   of the domain carries the prescribed $dn_e/dx$. \code{"outer"} frees the
   inner boundary entirely (the \code{ds(1)} flux becomes the unknown that
   the separatrix gradient determines).
-  \item[\code{dne_dx_bc} (float or None)] SI Neumann slope (m$^{-4}$),
-  imposed at $x_{\mathrm{inner}}$ when \code{ne_grad_bc_loc="inner"} and at
-  the separatrix when \code{ne_grad_bc_loc="outer"} (this is how Saarelma
-  Eq.~(20) is fed in). Left \code{None} it is read off the gradient of
-  \code{state.n_e} at that location.
+  \item[\code{dne_method} (\code{"state"} | \code{"user"} | \code{"Saarelma2023"}, \code{"state"})]
+  How the Neumann slope is set. \code{"state"} reads it off the gradient of
+  \code{state.n_e} at the Neumann location; \code{"user"} takes
+  \code{dne_dx_bc}; \code{"Saarelma2023"} (only with
+  \code{ne_grad_bc_loc="outer"}) uses Saarelma Eq.~(20),
+  $dn_e/dx|_0 = -n_e(0)/\sqrt{D_{\mathrm{SOL}}\tau_\parallel}$, with
+  $D_{\mathrm{SOL}} = D_{\mathrm{ped}}(0) = D_{\mathrm{NEO}}(0) +
+  D_{\mathrm{KBM}}(0) + C_{\mathrm{ETG}}(0)/n_e(0)$ evaluated with the
+  $D_{\mathrm{KBM}}$ of the initial guess. That value is computed once,
+  before the KBM Picard loop, and is frozen for the whole solve (resolved by
+  \code{bc_ig_helpers.resolve_ne_bcs} and
+  \code{bc_ig_helpers.resolve_saarelma2023_neumann}).
+  \item[\code{tau_par} (float or None)] Parallel loss time
+  $\tau_\parallel$ (s) for \code{dne_method="Saarelma2023"}; required there
+  and rejected otherwise.
+  \item[\code{dne_dx_bc} (float or None)] SI Neumann slope (m$^{-4}$) for
+  \code{dne_method="user"}, imposed at $x_{\mathrm{inner}}$ when
+  \code{ne_grad_bc_loc="inner"} and at the separatrix when
+  \code{ne_grad_bc_loc="outer"}; required there and rejected otherwise.
   \item[\code{ne_inner} (float or None)] Pedestal-top density (m$^{-3}$)
   used only to shape the initial guess. Left \code{None} it is read off
   \code{state.n_e} at $x_{\mathrm{inner}}$. Both are resolved by

@@ -30,7 +30,7 @@ sc_model = os.environ.get('SC_MODEL', '3D')
 sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'firedrake')
 ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'inner')
 
-output_dir = f'DIIIDDunsmore_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}'
+output_dir = f'outputs/DIIIDDunsmore_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}_V2'
 # ----------------------------------------------------------------
 
 
@@ -127,6 +127,12 @@ sc_params = {
 sc_params.update({
     'x_res':40,
     'ne_grad_bc_loc':ne_grad_bc_loc,
+    # 'Saarelma2023' (Eq. 20 separatrix gradient) needs the Neumann BC at the
+    # separatrix, so the 'inner' runs fall back to the state.n_e gradient
+    'dne_method': 'Saarelma2023' if ne_grad_bc_loc == 'outer' else 'state',
+    'tau_par': 1e-3 if ne_grad_bc_loc == 'outer' else None, # s, parallel loss time (Saarelma2023 only)
+    'initial_guess':'tanh', # ESCAPE_solve overrides: 'tanh' on the first ESCAPE iteration, 'state' after
+    'picard_gate_mode':'steep_grad',
     'picard_max_it':50,
     'picard_rtol':1e-6,
     'picard_relax':1.0,
@@ -135,8 +141,11 @@ sc_params.update({
 
 # SC scipy specific
 sc_params.update({
-    'bvp_tol':1e-6,
+    'bvp_tol':1e-6, # solve_bvp ('inner')
     'bvp_max_nodes':5000,
+    'ivp_method':"Radau", # solve_ivp ('outer')
+    'ivp_rtol':1e-8,
+    'ivp_atol':1e-10,
 })
 
 # SC firedrake specific

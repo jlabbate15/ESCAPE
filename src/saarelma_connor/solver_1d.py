@@ -196,12 +196,21 @@ class OneDSolverMixin:
             "history":     history,
         }
 
-    def calc_D_KBM_average_sc(self, n_e_ped, x_ped):
+    def calc_D_KBM_average_sc(self, n_e_ped, x_ped, gate_mode="average"):
         """KBM diffusivity on x_init from the pedestal-averaged Connor-Hastie
         alpha of ``n_e_ped`` on ``x_ped``, gated as a whole (Saarelma Eqs.
-        24-25). Also sets alpha_bar_ped, alpha_frac_above, kbm_gate_on,
-        alpha_local_ped and _D_KBM.
+        24-25). ``gate_mode`` 'average' averages alpha over all of ``x_ped``;
+        'steep_grad' averages it over [psin* - (1 - psin*), 1], with psin*
+        the steepest pressure gradient in 0.85 <= psin <= 1. Also sets
+        alpha_bar_ped, alpha_frac_above, kbm_gate_on, alpha_local_ped and
+        _D_KBM.
         """
+        gate_mode = str(gate_mode).lower()
+        if gate_mode not in ("average", "steep_grad"):
+            raise ValueError(
+                f"gate_mode must be 'average' or 'steep_grad', "
+                f"got {gate_mode!r}."
+            )
         x_ped = np.asarray(x_ped, dtype=float)
         n_e_ped = np.asarray(n_e_ped, dtype=float)
 
@@ -214,7 +223,41 @@ class OneDSolverMixin:
         dpdx = np.gradient(_pres, x_ped)                     # Pa/m
         _alpha = alpha_nodp * dpdx                           # dimensionless
 
-        alpha_bar = float(np.mean(_alpha))
+        if gate_mode == "steep_grad":
+            psin = np.interp(x_ped, self.x_init, self.psi_N_pres)
+            ped = (psin >= 0.85) & (psin <= 1.0)
+            if not np.any(ped):
+                raise ValueError(
+                    "gate_mode='steep_grad' found no grid points with "
+                    "0.85 <= psin <= 1.0."
+                )
+            i_star = np.flatnonzero(ped)[np.argmax(np.abs(dpdx[ped]))]
+            psin_star = float(psin[i_star])
+            psin_lo = psin_star - (1.0 - psin_star)
+            window = (psin >= psin_lo) & (psin <= 1.0)
+            # The grid starts at psin(x_inner); warn if that clips either
+            # the psin* search or the averaging window.
+            psin_min = float(psin.min())
+            if psin_min > 0.85:
+                import warnings
+                warnings.warn(
+                    f"gate_mode='steep_grad': the grid starts at psin = "
+                    f"{psin_min:.4f} > 0.85, so the steepest-gradient search "
+                    f"only covers [{psin_min:.4f}, 1.0] (psin* = "
+                    f"{psin_star:.4f})."
+                )
+            if psin_lo < psin_min - 1e-10:
+                import warnings
+                warnings.warn(
+                    f"gate_mode='steep_grad': the alpha averaging window "
+                    f"[{psin_lo:.4f}, 1.0] extends inside the grid's inner "
+                    f"edge psin = {psin_min:.4f}; alpha_bar is averaged over "
+                    f"[{psin_min:.4f}, 1.0] only."
+                )
+            self.psin_star = psin_star
+            alpha_bar = float(np.mean(_alpha[window]))
+        else:
+            alpha_bar = float(np.mean(_alpha))
         gate = alpha_bar > self.alpha_crit
         self.alpha_bar_ped = alpha_bar
         self.alpha_frac_above = float(np.mean(_alpha > self.alpha_crit))
@@ -351,17 +394,18 @@ class OneDSolverMixin:
         return False
 
     def _record_picard_sc(self, tag, converged, n_it, history,
-                          picard_max_it, picard_relax, picard_rtol):
+                          picard_max_it, picard_relax, picard_rtol,
+                          picard_gate_mode="average"):
         """Store ``picard_info`` / ``kbm_info`` and raise if diverged."""
         self.picard_info = {
             "converged": converged,
             "iterations": n_it,
-            "gate_mode": "average",
+            "gate_mode": picard_gate_mode,
             "history": history,
         }
         self.kbm_info = {
             "treatment": "picard",
-            "picard_gate_mode": "average",
+            "picard_gate_mode": picard_gate_mode,
             "eq6_form": getattr(self, "eq6_form", None),
             "first_step": getattr(self, "first_step_used", None),
             "alpha_crit": float(self.alpha_crit),
@@ -405,7 +449,9 @@ class OneDSolverMixin:
                        x_res=200,
                        free_params=None,
                        ne_grad_bc_loc="inner",
+                       dne_method="state",
                        dne_dx_bc=None,
+                       tau_par=None,
                        dne_dx_neginf=None,
                        initial_guess="pfile",
                        tanh_width=None,
@@ -415,6 +461,7 @@ class OneDSolverMixin:
                        picard_max_it=50,
                        picard_rtol=1e-6,
                        picard_relax=1.0,
+                       picard_gate_mode="average",
                        bvp_tol=1e-6,
                        bvp_max_nodes=5000,
                        ivp_method="Radau",
@@ -432,6 +479,7 @@ class OneDSolverMixin:
         returns the common result dict.
         """
         v = self.verbose if verbose is None else bool(verbose)
+        picard_gate_mode = str(picard_gate_mode).lower()
         picard_relax = float(picard_relax)
         if not (0.0 < picard_relax <= 1.0):
             raise ValueError(
@@ -451,11 +499,12 @@ class OneDSolverMixin:
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc,
+            dne_method=dne_method,
             dne_dx_bc=dne_dx_bc,
+            tau_par=tau_par,
             require_negative_slope=True,
         )
         self.ne_bcs = nebcs
-        dN_bc = (L / n0) * nebcs.dne_dx        # non-dim Neumann value
         # Saarelma's constant of integration C in the source term
         # (N' - N'_in).  NOT a boundary condition -- see bc_ig_helpers --
         # so it keeps the pedestal-top slope in both pathways.
@@ -485,6 +534,18 @@ class OneDSolverMixin:
             tanh_width=tanh_width, tanh_center=tanh_center,
         )
         self.ne_init = ne_init
+
+        # KBM diffusivity frozen from the initial guess for the first step.
+        # dne_method="Saarelma2023" also takes D_SOL from it, so that
+        # Neumann value is frozen for the whole solve (not refreshed by
+        # the Picard loop).
+        self.calc_D_KBM_average_sc(ne_init, x_grid,
+                                   gate_mode=picard_gate_mode)
+        D_KBM_frozen = self._D_KBM.copy()
+        bcig.resolve_saarelma2023_neumann(self, nebcs, self.x_init,
+                                          D_KBM_frozen,
+                                          require_negative_slope=True)
+        dN_bc = (L / n0) * nebcs.dne_dx        # non-dim Neumann value
 
         if v:
             print(nebcs.describe(prefix="[sc scipy] "))
@@ -539,10 +600,8 @@ class OneDSolverMixin:
 
         # --------------------------------------------------------------
         # Step 1: no-CX first step (report Eq. 6 / Saarelma Eq. 16),
-        # with D_KBM frozen from the initial guess.
+        # with D_KBM frozen from the initial guess (computed above).
         # --------------------------------------------------------------
-        self.calc_D_KBM_average_sc(ne_init, x_grid)
-        D_KBM_frozen = self._D_KBM.copy()
         f0_x, f1_x, df0_x, df1_x = _build_f_interp(D_KBM_frozen)
 
         def ode_first(xi, Y):
@@ -634,7 +693,8 @@ class OneDSolverMixin:
                            bounds_error=False, fill_value='extrapolate')
 
             ne_prev_on_grid = np.interp(x_grid, x_prev, ne_prev)
-            D_KBM_new = self.calc_D_KBM_average_sc(ne_prev_on_grid, x_grid)
+            D_KBM_new = self.calc_D_KBM_average_sc(ne_prev_on_grid, x_grid,
+                                                   gate_mode=picard_gate_mode)
             gate_now = bool(self.kbm_gate_on)
             D_KBM_frozen = (picard_relax * D_KBM_new
                             + (1.0 - picard_relax) * D_KBM_frozen)
@@ -697,7 +757,8 @@ class OneDSolverMixin:
 
         self._record_picard_sc("sc scipy", picard_converged, n_picard,
                                picard_history, picard_max_it, picard_relax,
-                               picard_rtol)
+                               picard_rtol,
+                               picard_gate_mode)
 
         # De-normalise and store.
         self.hat_x_sol = sol.x.copy()
@@ -790,7 +851,9 @@ class OneDSolverMixin:
                            fe_degree=2,
                            free_params=None,
                            ne_grad_bc_loc="inner",
+                           dne_method="state",
                            dne_dx_bc=None,
+                           tau_par=None,
                            dne_dx_neginf=None,
                            grad_bc_tol=1e-8,
                            grad_bc_max_it=25,
@@ -803,6 +866,7 @@ class OneDSolverMixin:
                            picard_max_it=50,
                            picard_rtol=1e-8,
                            picard_relax=1.0,
+                           picard_gate_mode="average",
                            linear_solver="lu",
                            ksp_rtol=1e-8,
                            ksp_max_it=200,
@@ -824,6 +888,7 @@ class OneDSolverMixin:
 
         v = self.verbose if verbose is None else bool(verbose)
         force_setup = not reuse_setup
+        picard_gate_mode = str(picard_gate_mode).lower()
         picard_relax = float(picard_relax)
         if not (0.0 < picard_relax <= 1.0):
             raise ValueError(
@@ -843,11 +908,12 @@ class OneDSolverMixin:
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc,
+            dne_method=dne_method,
             dne_dx_bc=dne_dx_bc,
+            tau_par=tau_par,
             require_negative_slope=True,
         )
         self.ne_bcs = nebcs
-        dN_bc_val = (L / n0) * nebcs.dne_dx     # non-dim Neumann value
         # Saarelma's constant of integration C -- NOT a boundary condition,
         # so it keeps the pedestal-top slope in both pathways.
         dne_dx_C = bcig.resolve_integration_constant(
@@ -878,6 +944,17 @@ class OneDSolverMixin:
         self._fd_cache["N_sc"] = N
         w = TestFunction(V)
 
+        # KBM diffusivity frozen from the initial guess (average gate).
+        # dne_method="Saarelma2023" also takes D_SOL from it, so that
+        # Neumann value is frozen for the whole solve (not refreshed by
+        # the Picard loop).
+        D_KBM_xinit = self.calc_D_KBM_average_sc(ne_init_sorted, x_sorted,
+                                                 gate_mode=picard_gate_mode)
+        bcig.resolve_saarelma2023_neumann(self, nebcs, self.x_init,
+                                          D_KBM_xinit,
+                                          require_negative_slope=True)
+        dN_bc_val = (L / n0) * nebcs.dne_dx     # non-dim Neumann value
+
         if v:
             print(nebcs.describe(prefix="[sc firedrake] "))
             print(f"[sc firedrake] N'(bc)          = {dN_bc_val:.3e}")
@@ -887,8 +964,6 @@ class OneDSolverMixin:
             print(f"[sc firedrake] scales: L = {L:.4e} m, n0 = {n0:.4e} m^-3,"
                   f" [D]_0 = {self._D0_sc:.4e} m^2/s")
 
-        # KBM diffusivity frozen from the initial guess (average gate).
-        D_KBM_xinit = self.calc_D_KBM_average_sc(ne_init_sorted, x_sorted)
         hat_D_KBM_fd = Function(V, name="hat_D_KBM_picard")
         hat_D_KBM_fd.dat.data[:] = np.interp(
             x_dofs_si, self.x_init, D_KBM_xinit
@@ -1041,7 +1116,8 @@ class OneDSolverMixin:
                     + (1.0 - picard_relax) * E_fd.dat.data
                 )
 
-            D_KBM_xinit = self.calc_D_KBM_average_sc(ne_curr_sorted, x_sorted)
+            D_KBM_xinit = self.calc_D_KBM_average_sc(ne_curr_sorted, x_sorted,
+                                                     gate_mode=picard_gate_mode)
             gate_now = bool(self.kbm_gate_on)
             hat_D_KBM_new = np.interp(
                 x_dofs_si, self.x_init, D_KBM_xinit
@@ -1083,7 +1159,8 @@ class OneDSolverMixin:
 
         self._record_picard_sc("sc firedrake", picard_converged, n_picard,
                                picard_history, picard_max_it, picard_relax,
-                               picard_rtol)
+                               picard_rtol,
+                               picard_gate_mode)
 
         # --------------------------------------------------------------
         # Extract converged profiles (non-dim and SI).

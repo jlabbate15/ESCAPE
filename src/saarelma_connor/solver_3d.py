@@ -212,7 +212,8 @@ class ThreeDSolverMixin:
                                         gate_mode=None,
                                         hat_x_dofs=None):
         """Compute the Connor-Hastie alpha in SI from ``hat_n_e`` and apply the
-        KBM gate (``gate_mode`` 'average', 'majority' or 'local'). Stores the
+        KBM gate (``gate_mode`` 'average', 'majority', 'local' or 'steep_grad').
+        Stores the
         dimensionless _hat_A_KBM, _hat_B_KBM, _hat_D_KBM and the gate
         diagnostics.
         """
@@ -244,20 +245,55 @@ class ThreeDSolverMixin:
 
         # Resolve the gate mode
         gate_mode = str(gate_mode).lower()
-        if gate_mode not in ("average", "majority", "local"):
+        if gate_mode not in ("average", "majority", "local", "steep_grad"):
             raise ValueError(
-                f"gate_mode must be 'average', 'majority', or 'local', "
-                f"got {gate_mode!r}."
+                f"gate_mode must be 'average', 'majority', 'local', or "
+                f"'steep_grad', got {gate_mode!r}."
             )
 
-        alpha_bar = float(np.mean(_alpha))
+        if gate_mode == "steep_grad":
+            # Average alpha over [psin* - (1 - psin*), 1], where psin* is the
+            # steepest pressure gradient in the pedestal (0.85 <= psin <= 1).
+            psin = np.interp(x_si, self.x_init, self.psi_N_pres)
+            ped = (psin >= 0.85) & (psin <= 1.0)
+            if not np.any(ped):
+                raise ValueError(
+                    "gate_mode='steep_grad' found no grid points with "
+                    "0.85 <= psin <= 1.0."
+                )
+            i_star = np.flatnonzero(ped)[np.argmax(np.abs(dpdx[ped]))]
+            psin_star = float(psin[i_star])
+            psin_lo = psin_star - (1.0 - psin_star)
+            window = (psin >= psin_lo) & (psin <= 1.0)
+            # The grid starts at psin(x_inner); warn if that clips either
+            # the psin* search or the averaging window.
+            psin_min = float(psin.min())
+            if psin_min > 0.85:
+                warnings.warn(
+                    f"gate_mode='steep_grad': the grid starts at psin = "
+                    f"{psin_min:.4f} > 0.85, so the steepest-gradient search "
+                    f"only covers [{psin_min:.4f}, 1.0] (psin* = "
+                    f"{psin_star:.4f})."
+                )
+            if psin_lo < psin_min - 1e-10:
+                warnings.warn(
+                    f"gate_mode='steep_grad': the alpha averaging window "
+                    f"[{psin_lo:.4f}, 1.0] extends inside the grid's inner "
+                    f"edge psin = {psin_min:.4f}; alpha_bar is averaged over "
+                    f"[{psin_min:.4f}, 1.0] only."
+                )
+            self.psin_star = psin_star
+            alpha_bar = float(np.mean(_alpha[window]))
+        else:
+            alpha_bar = float(np.mean(_alpha))
         self.alpha_bar_ped = alpha_bar
         self.alpha_frac_above = float(np.mean(_alpha > self.alpha_crit))
         self.alpha_local_ped = _alpha[unsort_idx]
 
-        if gate_mode == "average":
+        if gate_mode in ("average", "steep_grad"):
             # Saarelma et al. (2023) Eqs. 24--25: whole-grid gate on
             # alpha_bar, diffusivity locked to (alpha_bar - alpha_crit).
+            # 'steep_grad' differs only in the window alpha_bar averages over.
             gate = alpha_bar > self.alpha_crit
             self.kbm_gate_on = bool(gate)
             D_KBM_si = np.where(gate, (alpha_bar - self.alpha_crit) * G_KBM, 0.0)
@@ -610,7 +646,9 @@ class ThreeDSolverMixin:
                                    ne_inner_bc="neumann",
                                    ne_grad_bc_loc="inner",
                                    ne_inner=None,
+                                   dne_method="state",
                                    dne_dx_bc=None,
+                                   tau_par=None,
                                    initial_guess="tanh",
                                    tanh_width=None,
                                    tanh_center=None,
@@ -644,10 +682,10 @@ class ThreeDSolverMixin:
         ne_grad_bc_loc = bcig.check_ne_bc_loc(ne_grad_bc_loc)
         self.ne_grad_bc_loc = ne_grad_bc_loc
         picard_gate_mode = str(picard_gate_mode).lower()
-        if picard_gate_mode != "average":
+        if picard_gate_mode not in ("average", "steep_grad"):
             raise NotImplementedError(
                 "implementation='scipy' supports picard_gate_mode='average' "
-                f"only (got {picard_gate_mode!r}).  'majority' freezes the "
+                f"or 'steep_grad' only (got {picard_gate_mode!r}).  'majority' freezes the "
                 "local A/B KBM structure, which makes the conductance depend "
                 "on hat_n_e' and turns Phi -> hat_n_e' into a per-point "
                 "root-find; use implementation='firedrake' for it."
@@ -670,8 +708,10 @@ class ThreeDSolverMixin:
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc,
+            dne_method=dne_method,
             dne_dx_bc=dne_dx_bc,
             ne_inner=ne_inner,
+            tau_par=tau_par,
         )
         self.ne_bcs = nebcs
 
@@ -684,12 +724,6 @@ class ThreeDSolverMixin:
         hat_ne_x0     = nebcs.ne_outer / n0        # = 1 by construction
         hat_nFC_x0    = self.nFC_x0 / n0
         hat_nCX_x0    = self.nCX_x0 / n0
-        hat_dne_dx_bc = L * nebcs.dne_dx / n0
-
-        if v:
-            print(nebcs.describe(prefix="[nondim scipy] "))
-            print(f"[nondim scipy] hat_nFC(0)       = {hat_nFC_x0:.3e}")
-            print(f"[nondim scipy] hat_nCX(0)       = {hat_nCX_x0:.3e}")
 
         # Collocation grid (ascending, hat_x in [-1, 0]) and coefficients.
         hat_x = np.linspace(-1.0, 0.0, int(x_res))
@@ -707,9 +741,20 @@ class ThreeDSolverMixin:
         N_g = np.clip(ne_init / n0, ne_floor, None)
 
         # KBM diffusivity frozen from the initial guess (Saarelma Eq. 25).
-        self.calc_pressure_quantities_nondim(N_g, gate_mode="average",
+        self.calc_pressure_quantities_nondim(N_g, gate_mode=picard_gate_mode,
                                              hat_x_dofs=hat_x)
         hat_D_KBM = self._hat_D_KBM.copy()
+
+        # dne_method="Saarelma2023" takes D_SOL from this initial-guess
+        # D_KBM, so that Neumann value is frozen for the whole solve (not
+        # refreshed by the Picard loop).
+        bcig.resolve_saarelma2023_neumann(self, nebcs, x_si, self.D_KBM_si)
+        hat_dne_dx_bc = L * nebcs.dne_dx / n0
+
+        if v:
+            print(nebcs.describe(prefix="[nondim scipy] "))
+            print(f"[nondim scipy] hat_nFC(0)       = {hat_nFC_x0:.3e}")
+            print(f"[nondim scipy] hat_nCX(0)       = {hat_nCX_x0:.3e}")
 
         def conductance(hat_x_q, N_q, D_KBM_q):
             """hat_f = hat_g (hat_D_NEO + hat_D_KBM) + hat_g hat_C_ETG / N."""
@@ -818,7 +863,7 @@ class ThreeDSolverMixin:
 
             # Refreeze the gate / diffusivity from the new profile.
             self.calc_pressure_quantities_nondim(
-                np.clip(N_new, ne_floor, None), gate_mode="average",
+                np.clip(N_new, ne_floor, None), gate_mode=picard_gate_mode,
                 hat_x_dofs=hat_x,
             )
             gate_now = bool(self.kbm_gate_on)
@@ -910,7 +955,9 @@ class ThreeDSolverMixin:
                       ne_inner_bc="neumann",
                       ne_grad_bc_loc="inner",
                       ne_inner=None,
+                      dne_method="state",
                       dne_dx_bc=None,
+                      tau_par=None,
                       grad_bc_tol=1e-8,
                       grad_bc_max_it=25,
                       grad_bc_seed=None,
@@ -962,7 +1009,9 @@ class ThreeDSolverMixin:
                 ne_inner_bc=ne_inner_bc,
                 ne_grad_bc_loc=ne_grad_bc_loc,
                 ne_inner=ne_inner,
+                dne_method=dne_method,
                 dne_dx_bc=dne_dx_bc,
+                tau_par=tau_par,
                 initial_guess=initial_guess,
                 tanh_width=tanh_width,
                 tanh_center=tanh_center,
@@ -1010,8 +1059,10 @@ class ThreeDSolverMixin:
         # Only the two conditions belonging to ne_grad_bc_loc are looked up.
         nebcs = bcig.resolve_ne_bcs(
             self, ne_grad_bc_loc,
+            dne_method=dne_method,
             dne_dx_bc=dne_dx_bc,
-            ne_inner=ne_inner, 
+            ne_inner=ne_inner,
+            tau_par=tau_par,
         )
         self.ne_bcs = nebcs
 
@@ -1061,9 +1112,9 @@ class ThreeDSolverMixin:
                 f"got {kbm_treatment!r}."
             )
         picard_gate_mode = str(picard_gate_mode).lower()
-        if kbm_treatment == "picard" and picard_gate_mode not in ("average", "majority"):
+        if kbm_treatment == "picard" and picard_gate_mode not in ("average", "majority", "steep_grad"):
             raise ValueError(
-                "picard_gate_mode must be 'average' or 'majority', "
+                "picard_gate_mode must be 'average', 'majority' or 'steep_grad', "
                 f"got {picard_gate_mode!r}."
             )
         picard_relax = float(picard_relax)
@@ -1117,6 +1168,11 @@ class ThreeDSolverMixin:
         hat_nFC_x0       = self.nFC_x0  / self._n0_nd
         hat_nCX_x0       = self.nCX_x0  / self._n0_nd
         # Neumann value: ds(1) flux ("inner") or hat_n_e'(0) target ("outer").
+        # dne_method="Saarelma2023" takes D_SOL from the initial-guess D_KBM
+        # computed above, so that value is frozen for the whole solve (not
+        # refreshed by the Picard loop or the inline KBM gate).
+        bcig.resolve_saarelma2023_neumann(self, nebcs, x_dofs_si,
+                                          self.D_KBM_si)
         hat_dne_dx_bc    = self._L_nd * nebcs.dne_dx / self._n0_nd
 
         if v:
@@ -1251,7 +1307,7 @@ class ThreeDSolverMixin:
         if kbm_treatment == "picard":
             # Frozen KBM coefficients: "average" puts hat_D_KBM in the A-slot
             # with B = 0; "majority" freezes the local A/B structure.
-            if picard_gate_mode == "average":
+            if picard_gate_mode in ("average", "steep_grad"):
                 hat_A_KBM_picard_fd = Function(V, name="hat_D_KBM_picard")
                 hat_A_KBM_picard_fd.dat.data[:] = self._hat_D_KBM
                 self._fd_cache["hat_D_KBM_picard_fd"] = hat_A_KBM_picard_fd
@@ -1395,7 +1451,7 @@ class ThreeDSolverMixin:
 
                 # Picard relax and update the frozen KBM coefficients
                 # (Functions referenced by F; no form rebuild needed).
-                if picard_gate_mode == "average":
+                if picard_gate_mode in ("average", "steep_grad"):
                     hat_A_KBM_picard_fd.dat.data[:] = ( # = self._hat_D_KBM if picard_relax == 1.0. hat_A_KBM_picard_fd is frozen from the previous iterate.
                         picard_relax * self._hat_D_KBM
                         + (1.0 - picard_relax) * hat_A_KBM_picard_fd.dat.data
