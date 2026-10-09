@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from src.ESCAPE.ESCAPE_solve import ESCAPE_solve
 from examples.device_prediction.helper_functions import calc_pressure_profile
+from helpers.ped_width_proxy import ped_center, ped_width
 from parse_dunsmore_db import (DB_PATH, EQDSK_DIR, load_db, load_equilibrium, build_kprof,
                                kprof_to_profiles, experimental_data, heating_power)
 import time
@@ -26,11 +27,14 @@ De_chie_etgs = np.array([0.05])
 ncx_x0_ratios = np.array([15])
 
 # Overridable from the environment (see submit_scan.sh)
-sc_model = os.environ.get('SC_MODEL', '3D')
-sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'firedrake')
-ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'inner')
+sc_model = os.environ.get('SC_MODEL', '1D')
+sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'scipy')
+ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'outer')
+picard_relax = float(os.environ.get('PICARD_RELAX', 0.5))
+picard_max_it = int(os.environ.get('PICARD_MAX_IT', 50))
+run_suffix = os.environ.get('RUN_SUFFIX', '_V4_fullP')
 
-output_dir = f'outputs/DIIIDDunsmore_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}_V2'
+output_dir = f'outputs/DIIIDDunsmore_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}{run_suffix}'
 # ----------------------------------------------------------------
 
 
@@ -71,7 +75,20 @@ if equil_num == 0:
 # Unlike the HighPerfHMode set, this database has per-shot powers (MW):
 # ptot = pinj + pech + pohm, pnet = ptot - prad.
 P_HEAT_KEY = 'pnet'     # net (NBI + ECH + Ohmic - radiated) heating, assumes dE/dt of plasma is small (since we already assume steady-state)
-ELECTRON_FRAC = 0.5     # Saarelma et al. take ~half the heating as the electron channel
+ELECTRON_FRAC = 1     # Saarelma et al. take ~half the heating as the electron channel
+
+# ── Experimental n_e -> SC inputs ────────────────────────────────────────────
+# ne_outer (ESCAPE ne_x0) is the experimental n_e at psi_N = 1, and the tanh
+# initial-guess centre is psi_N = 1 - width/2 of the experimental pedestal
+# (helpers/ped_width_proxy.ped_center, fitted on psi_N >= psi_N_inner_boundary);
+# ESCAPE_solve maps that psi_N onto the SI x grid for sc_params['tanh_center'].
+PED_CENTER_METHOD = 'tanh+grad' # ped_width_proxy method(s) averaged for the pedestal width
+USE_EXP_TANH_CENTER = True # False: tanh_center=None (midpoint default) for every equilibrium
+# First-ESCAPE-iteration n_e guess: 'tanh' (above) or 'tanh_linear' (a line from
+# ne_inner with the experimental slope at x_inner out to psi_N_pwg = 1 - pedestal width,
+# joined with matching value and slope to a tanh step down to ne_outer at the separatrix;
+# ESCAPE_solve maps psi_N_pwg to sc_params['x_pwg'])
+INITIAL_GUESS_0 = 'tanh' # 'tanh' or 'tanh_linear'
 
 
 def state_to_dict(state):
@@ -103,7 +120,6 @@ def state_to_dict(state):
 ESCAPE_tol_max = 1e-5
 ESCAPE_iter_max = 1
 out_dir = output_dir
-ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)
 quasineutral_flag = True
 T_rat_flag = True # True if using a temperature ratio between ions and electrons, False if doing something else
 T_rat = 1
@@ -133,9 +149,9 @@ sc_params.update({
     'tau_par': 1e-3 if ne_grad_bc_loc == 'outer' else None, # s, parallel loss time (Saarelma2023 only)
     'initial_guess':'tanh', # ESCAPE_solve overrides: 'tanh' on the first ESCAPE iteration, 'state' after
     'picard_gate_mode':'steep_grad',
-    'picard_max_it':50,
+    'picard_max_it':picard_max_it,
     'picard_rtol':1e-6,
-    'picard_relax':1.0,
+    'picard_relax':picard_relax,
     'reuse_setup':False,
 })
 
@@ -183,7 +199,7 @@ epednn_params = {
 import itertools
 
 # ne_x0s = [None, 1e20, 2e20] # m^-3, manually specify outer bc for electron density
-ne_x0s = [None] # m^-3, manually specify outer bc for electron density
+ne_x0s = [None] # m^-3, manually specify outer bc for electron density; None uses the experimental separatrix n_e
 
 scan_total = len(alpha_crits) * len(C_KBMs) * len(De_chie_etgs) * len(nFC_x0s) * len(ncx_x0_ratios) * len(ne_x0s)
 print(f'Total number of scans: {scan_total}*{equil_num}')
@@ -203,15 +219,36 @@ for equil_tag in equil_tags:
     profiles = kprof_to_profiles(kprof_params)
     psi_N_p, p_Pa, p_mode = calc_pressure_profile(profiles)
 
+    # Experimental n_e -> ne_outer and the tanh initial-guess centre
+    psin_ne_exp = np.asarray(profiles['psin_ne'], dtype=float)
+    ne_exp = np.asarray(profiles['n_e'], dtype=float)
+    ne_x0_exp = float(np.interp(1.0, psin_ne_exp, ne_exp)) # m^-3, experimental separatrix density
+    ped_mask = psin_ne_exp >= sc_params['psi_N_inner_boundary'] # fit on the SC domain only
+    tanh_center_psiN = None
+    if USE_EXP_TANH_CENTER:
+        try:
+            tanh_center_psiN = ped_center(psin_ne_exp[ped_mask], ne_exp[ped_mask], method=PED_CENTER_METHOD)
+        except (RuntimeError, ValueError) as e:
+            print(f'{equil_tag}: pedestal centre fit failed ({e}); using the midpoint tanh_center')
+    psiN_pwg = None
+    if INITIAL_GUESS_0 == 'tanh_linear':
+        psiN_pwg = 1.0 - ped_width(psin_ne_exp[ped_mask], ne_exp[ped_mask], method=PED_CENTER_METHOD)
+    sc_params.pop('tanh_center', None) # ESCAPE_solve sets it in place; don't carry it to the next equilibrium
+    sc_params.pop('x_pwg', None)
+    sc_params['initial_guess'] = INITIAL_GUESS_0 # ESCAPE_solve overwrites it with 'state' after iteration 0
+
     # P_tot_e: heating power to electrons [W]
     P_tot_e = heating_power(entry, P_HEAT_KEY) * ELECTRON_FRAC
 
-    print(f'{equil_tag}: Z_eff = {Z_eff:.3f}, P_tot_e = {P_tot_e/1e6:.2f} MW, pressure: {p_mode}')
+    tc_str = 'midpoint' if tanh_center_psiN is None else f'{tanh_center_psiN:.4f}'
+    print(f'{equil_tag}: Z_eff = {Z_eff:.3f}, P_tot_e = {P_tot_e/1e6:.2f} MW, pressure: {p_mode}, '
+          f'ne_x0 = {ne_x0_exp:.3e} m^-3, tanh_center psi_N = {tc_str}')
 
     out_dir_ref = Path(out_path) # out_dir / equil_tag
 
     j=0
-    for ne_x0 in ne_x0s:
+    for ne_x0_scan in ne_x0s:
+        ne_x0 = ne_x0_exp if ne_x0_scan is None else ne_x0_scan
         i=0
         for combo in itertools.product(alpha_crits, C_KBMs, De_chie_etgs, nFC_x0s, ncx_x0_ratios):
             free_params = {
@@ -235,7 +272,9 @@ for equil_tag in equil_tags:
                     Z_i = Z_i, # Z of ions
                     Z_eff = Z_eff,
                     P_tot_e = P_tot_e, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002)
-                    ne_x0 = ne_x0, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)
+                    ne_x0 = ne_x0, # m^-3, electron density at the separatrix (experimental unless ne_x0s overrides it)
+                    tanh_center_psiN = tanh_center_psiN, # psi_N, experimental pedestal centre for the tanh n_e initial guess
+                    psiN_pwg = psiN_pwg, # psi_N, experimental pedestal top for the 'tanh_linear' n_e initial guess
                     equil_params = equil_params, # dictionary of required equilibrium parameters
                     kprof_params = kprof_params, # dictionary of required kinetic profile (density, temperature) parameters
                     quasineutral_flag = quasineutral_flag,
@@ -278,12 +317,20 @@ for equil_tag in equil_tags:
                     'Zeff': Z_eff,
                     'P_tot_e': P_tot_e,
                     'i': i,
+                    'ne_x0': ne_x0, # m^-3
+                    'tanh_center_psiN': tanh_center_psiN,
+                    'initial_guess_0': INITIAL_GUESS_0,
+                    'psiN_pwg': psiN_pwg,
+                    'x_pwg': getattr(state, 'x_pwg_used', None), # m, as passed to the SC solver
+                    'tanh_center_x': getattr(state, 'tanh_center_used', None), # m, as passed to the SC solver
                     'state': state_to_dict(state), # picklable ESCAPE state attributes
                     'ESCAPE_runtime': t1-t0,
                 }
                 np.save(out_dir / 'out_dict.npy', out_dict)
             except Exception as e:
-                out_dict = {'failed': True, 'free_params': free_params, 'error': str(e)}
+                out_dict = {'failed': True, 'free_params': free_params, 'error': str(e),
+                            'ne_x0': ne_x0, 'tanh_center_psiN': tanh_center_psiN,
+                            'initial_guess_0': INITIAL_GUESS_0, 'psiN_pwg': psiN_pwg}
                 np.save(out_dir / 'failed.npy', out_dict)
 
             if i%50 == 0:

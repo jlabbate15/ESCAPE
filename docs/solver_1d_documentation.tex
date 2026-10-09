@@ -520,8 +520,10 @@ changing.
   $dn_e/dx|_0 = -n_e(0)/\sqrt{D_{\mathrm{SOL}}\tau_\parallel}$, with
   $D_{\mathrm{SOL}} = D_{\mathrm{ped}}(0) = D_{\mathrm{NEO}}(0) +
   D_{\mathrm{KBM}}(0) + C_{\mathrm{ETG}}(0)/n_e(0)$ evaluated with the
-  $D_{\mathrm{KBM}}$ of the initial guess. That value is computed once,
-  before the KBM Picard loop, and is frozen for the whole solve (resolved by
+  $D_{\mathrm{KBM}}$ of the initial guess for the first step. In
+  \code{solve_sc_scipy} it is recomputed on every Picard iteration from the
+  $D_{\mathrm{KBM}}$ of the previous iterate; \code{solve_sc_firedrake}
+  computes it once, before the KBM Picard loop, and freezes it (resolved by
   \code{bc_ig_helpers.resolve_ne_bcs} and
   \code{bc_ig_helpers.resolve_saarelma2023_neumann}).
   \item[\code{tau_par} (float or None)] Parallel loss time
@@ -537,10 +539,28 @@ changing.
   Left \code{None} it is read off the gradient of \code{state.n_e} at
   $x_{\mathrm{inner}}$ (resolved by
   \code{bc_ig_helpers.resolve_integration_constant}).
-  \item[\code{initial_guess} (\code{"pfile"} | \code{"linear"} | \code{"tanh"})]
+  \item[\code{initial_guess} (\code{"state"} | \code{"linear"} | \code{"tanh"} | \code{"tanh_linear"})]
   Shape of the initial $n_e$ profile (SI).
-  \item[\code{tanh_width}, \code{tanh_center} (float or None)] Parameters
-  of the \code{"tanh"} initial guess (SI metres).
+  \item[\code{tanh_center} (float or None)] Centre (SI metres, strictly
+  inside $(x_{\mathrm{inner}}, 0)$; default the midpoint) of the
+  \code{"tanh"} initial guess, its only shape parameter. The guess meets
+  $n_{e,\mathrm{inner}}$ at $x_{\mathrm{inner}}$ and $n_{e,\mathrm{outer}}$
+  at $x=0$ exactly; its half-width is the distance from the centre to the
+  nearer endpoint divided by 2, so a centred tanh is symmetric with the
+  smallest slopes, a centre near $0$ stays flat and then drops steeply to
+  $n_{e,\mathrm{outer}}$, and a centre near $x_{\mathrm{inner}}$ drops
+  steeply first and then flattens towards the separatrix.
+  \item[\code{x_pwg} (float or None)] Pedestal top (SI metres, strictly
+  inside $(x_{\mathrm{inner}}, 0)$, e.g.\ $\psi_N = 1 - $ pedestal width) of
+  the \code{"tanh_linear"} initial guess, which it requires. That guess is the
+  line $L(x) = n_{e,\mathrm{inner}} + n_e'(x_{\mathrm{inner}})(x -
+  x_{\mathrm{inner}})$, with $n_e'$ the slope of \code{state.n_e}, plus on
+  $[x_{\mathrm{pwg}}, 0]$ the term $(n_{e,\mathrm{outer}} - L(0))\,S(x)$.
+  $S$ is a tanh centred at $x_{\mathrm{pwg}}/2$ (half-width
+  $|x_{\mathrm{pwg}}|/4$) minus its tangent line at $x_{\mathrm{pwg}}$,
+  rescaled so $S(x_{\mathrm{pwg}}) = S'(x_{\mathrm{pwg}}) = 0$ and $S(0) = 1$,
+  so $n_e$ and $dn_e/dx$ are continuous at $x_{\mathrm{pwg}}$ and the guess
+  meets $n_{e,\mathrm{outer}}$ at the separatrix.
   \item[\code{eq6_form} (\code{"complete"} | \code{"paper"})] Which form of
   the first step to solve. \code{"paper"} is Eq.~6 exactly as printed and
   is only usable when $\gradr$ is close to 1: otherwise it either fails

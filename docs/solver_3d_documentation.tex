@@ -508,7 +508,7 @@ only in \code{"inner"} mode.
 
 \paragraph{Initial guess.} $n_e$ comes from
 \code{bc_ig_helpers.build_ne_initial_guess} (\code{initial_guess},
-\code{tanh_width}, \code{tanh_center}) and the two neutral profiles from
+\code{tanh_center}, \code{x_pwg}) and the two neutral profiles from
 \code{bc_ig_helpers.build_neutral_initial_guess} (\code{nFC_ic},
 \code{nCX_ic}) --- the same shared helpers, with the same options, that the
 Firedrake path uses, so the two discretisations start from identical SI
@@ -609,8 +609,16 @@ automatic inner-boundary search is no longer offered).
   information the \code{"outer"} pathway forbids. It is also markedly more
   robust: $r(s)$ is discontinuous where the profile switches solution
   branch, and approaching from zero avoids straddling that jump.
-  \item[\code{initial_guess}, \code{tanh_width}, \code{tanh_center}] Shape
-  of the initial $n_e$ profile; \code{tanh_width} is in $x$ units (m).
+  \item[\code{initial_guess}, \code{tanh_center}] Shape of the initial
+  $n_e$ profile. \code{tanh_center} (m, strictly inside
+  $(x_{\mathrm{inner}}, 0)$, default the midpoint) is the only shape
+  parameter of the \code{"tanh"} guess, which meets
+  $n_{e,\mathrm{inner}}$ and $n_{e,\mathrm{outer}}$ exactly at the two
+  ends (see the 1D documentation). \code{x_pwg} (m) is the pedestal top
+  of the \code{"tanh_linear"} guess: a line from $n_{e,\mathrm{inner}}$
+  with the profile slope at $x_{\mathrm{inner}}$, joined with continuous value
+  and slope at \code{x_pwg} to a tanh step that reaches
+  $n_{e,\mathrm{outer}}$ at the separatrix.
   \item[\code{linear_solver}, \code{ksp_rtol}, \code{ksp_max_it}] PETSc
   linear-solver controls.
   \item[\code{reuse_setup} (bool)] Reuse cached grids / meshes.

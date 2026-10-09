@@ -650,8 +650,8 @@ class ThreeDSolverMixin:
                                    dne_dx_bc=None,
                                    tau_par=None,
                                    initial_guess="tanh",
-                                   tanh_width=None,
                                    tanh_center=None,
+                                   x_pwg=None,
                                    nFC_ic="solve",
                                    nCX_ic="solve",
                                    picard_gate_mode="average",
@@ -735,7 +735,8 @@ class ThreeDSolverMixin:
         # ---- Initial guess ------------------------------------------------
         ne_init = bcig.build_ne_initial_guess(
             self, x_si, initial_guess, nebcs,
-            tanh_width=tanh_width, tanh_center=tanh_center,
+            tanh_center=tanh_center,
+            x_pwg=x_pwg,
         )
         self.ne_init = ne_init
         N_g = np.clip(ne_init / n0, ne_floor, None)
@@ -962,8 +963,8 @@ class ThreeDSolverMixin:
                       grad_bc_max_it=25,
                       grad_bc_seed=None,
                       initial_guess="tanh",
-                      tanh_width=None,
                       tanh_center=None,
+                      x_pwg=None,
                       linear_solver="lu",
                       ksp_rtol=1e-8,
                       ksp_max_it=200,
@@ -1013,8 +1014,8 @@ class ThreeDSolverMixin:
                 dne_dx_bc=dne_dx_bc,
                 tau_par=tau_par,
                 initial_guess=initial_guess,
-                tanh_width=tanh_width,
                 tanh_center=tanh_center,
+                x_pwg=x_pwg,
                 nFC_ic=nFC_ic,
                 nCX_ic=nCX_ic,
                 picard_gate_mode=picard_gate_mode,
@@ -1099,7 +1100,8 @@ class ThreeDSolverMixin:
         # ------------------------------------------------------------------
         ne_init = bcig.build_ne_initial_guess(
             self, x_dofs_si, initial_guess, nebcs,
-            tanh_width=tanh_width, tanh_center=tanh_center,
+            tanh_center=tanh_center,
+            x_pwg=x_pwg,
         )
 
         # ------------------------------------------------------------------

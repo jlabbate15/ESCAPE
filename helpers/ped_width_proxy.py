@@ -352,6 +352,24 @@ def ped_width(x, n, method=DEFAULT_METHOD):
     return ped_width_all(x, n, method=method)['width']
 
 
+def ped_center(x, n, method=DEFAULT_METHOD, res=None):
+    """
+    Pedestal centre in x units: halfway between the start of the fall-off and
+    the outer edge of the profile (the separatrix for a profile ending at
+    psi_N = 1), i.e. edge - width/2 with `width` from ped_width_all. For psi_N
+    input this is 1 - width/2.
+
+    The fits' symmetry points are not used: on profiles truncated at the
+    separatrix the steepest gradient sits at or just past the edge, so they
+    do not mark the middle of the pedestal.
+    """
+    if res is None:
+        res = ped_width_all(x, n, method=method)
+    x0, L, sign, _ = res['norm']
+    edge = sign * (x0 + L)  # outer (low-density) end of the input profile
+    return float(edge - sign * 0.5 * res['width'])
+
+
 def plot_ped_width(x, n, ax=None, res=None, method=DEFAULT_METHOD):
     """Debug plot of the profile with the fits that were run (in the input coordinates)."""
     import matplotlib.pyplot as plt

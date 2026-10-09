@@ -20,6 +20,8 @@ def ESCAPE_solve(
     Z_i = 1, # Z of ions
     P_tot_e = None, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
     ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
+    tanh_center_psiN = None, # psi_N, centre of the tanh n_e initial guess (converted to SI x for sc_params['tanh_center']); None keeps sc_params as is, >= 1 uses the tanh_center=None default
+    psiN_pwg = None, # psi_N, pedestal top (1 - pedestal width) for the 'tanh_linear' n_e initial guess (converted to SI x for sc_params['x_pwg'])
     equil_params = None, # dictionary of required equilibrium parameters
     kprof_params = None, # dictionary of required kinetic profile (density, temperature) parameters
     quasineutral_flag = True,
@@ -41,6 +43,17 @@ def ESCAPE_solve(
         Dictionary of parameters for the Saarelma-Connor model solve (for options see src/saarelma_connor/saarelma_connor_base.py)
     epednn_params : dict
         Dictionary of parameters for the EPEDNN model solve (for options see src/epednn/epednn_call.py)
+    tanh_center_psiN : float or None
+        Centre of the tanh n_e initial guess in normalized poloidal flux. On the
+        first ESCAPE iteration it is mapped to the SI x grid (m, 0 at the
+        separatrix), clipped to lie inside x_inner, and stored as
+        sc_params['tanh_center']. A value >= 1 (at or past the separatrix)
+        is dropped and the solver's tanh_center=None (midpoint) default used.
+    psiN_pwg : float or None
+        Pedestal top (psi_N = 1 - pedestal width) of the 'tanh_linear' n_e
+        initial guess. On the first ESCAPE iteration it is mapped to the SI x
+        grid, clipped to lie inside (x_inner, 0), and stored as
+        sc_params['x_pwg'].
     out_dir : str
         Path to directory to save successful solutions from the Saarelma-Connor model.
     """
@@ -75,7 +88,6 @@ def ESCAPE_solve(
             path.unlink()
 
     # Parameters to be used in the loop
-    tanh_width_new = None
     psi_N_Te_new = None
     T_prof_keV = None
     pedestal_height = None
@@ -89,19 +101,57 @@ def ESCAPE_solve(
     x_to_psi = interp1d(x_grid_full,psi_N_pres, kind='linear',bounds_error=False, fill_value='extrapolate')
 
 
+    # Requested first-iteration guess, read before the loop overwrites
+    # sc_params['initial_guess'] with 'state'
+    initial_guess_0 = "tanh_linear" if sc_params.get('initial_guess') == "tanh_linear" else "tanh"
+
     # ----------------------------- ESCAPE LOOP -----------------------------#
     for ESCAPE_iter in range(ESCAPE_iter_max):
         print("------------------------------------------------")
         print(f"ESCAPE Loop Iter {ESCAPE_iter}")
 
-        # First iteration defaults to tanh guess
+        # First iteration uses a tanh guess ('tanh_linear' if requested,
+        # otherwise 'tanh'); later iterations start from the state
         if ESCAPE_iter == 0:
-            sc_params['initial_guess'] = "tanh"
+            sc_params['initial_guess'] = initial_guess_0
         else:
             sc_params['initial_guess'] = "state"
 
         # SAARELMA-CONNOR SOLVE
         state.init_saarelmaconnor(params=sc_params)
+
+        # tanh initial-guess centre: psi_N -> SI x, kept strictly inside
+        # (x_inner, 0) as build_ne_initial_guess requires.  A centre at or
+        # past the separatrix is dropped (tanh_center=None, the midpoint
+        # default); one inside the inner boundary is clipped.
+        if ESCAPE_iter == 0 and tanh_center_psiN is not None and tanh_center_psiN >= 1.0:
+            print(f"tanh_center: psi_N = {tanh_center_psiN:.4f} >= 1 (at/past the separatrix); "
+                  f"dropped, using the tanh_center=None default")
+            sc_params['tanh_center'] = None
+            state.tanh_center_used = None
+        elif ESCAPE_iter == 0 and tanh_center_psiN is not None:
+            xc = float(psi_to_x(tanh_center_psiN))
+            x_in = float(state.x_inner)
+            margin = 0.02 * abs(x_in)
+            xc_clip = float(np.clip(xc, x_in + margin, -margin))
+            if xc_clip != xc:
+                print(f"tanh_center: psi_N = {tanh_center_psiN:.4f} -> x = {xc:.4e} m lies "
+                      f"outside (x_inner, 0) = ({x_in:.4e}, 0) m; clipped to {xc_clip:.4e} m")
+            sc_params['tanh_center'] = xc_clip
+            state.tanh_center_used = xc_clip
+
+        # 'tanh_linear' pedestal top: psi_N -> SI x, kept inside (x_inner, 0)
+        if ESCAPE_iter == 0 and psiN_pwg is not None:
+            xp = float(psi_to_x(psiN_pwg))
+            x_in = float(state.x_inner)
+            margin = 0.02 * abs(x_in)
+            xp_clip = float(np.clip(xp, x_in + margin, -margin))
+            if xp_clip != xp:
+                print(f"x_pwg: psi_N = {psiN_pwg:.4f} -> x = {xp:.4e} m lies "
+                      f"outside (x_inner, 0) = ({x_in:.4e}, 0) m; clipped to {xp_clip:.4e} m")
+            sc_params['x_pwg'] = xp_clip
+            state.x_pwg_used = xp_clip
+
         res = state.solve_scmodel(**sc_params) # model and implementation are keys of sc_params
         x_sol, ne_sol = res['x'], res['ne']
         nFC_sol, nCX_sol = res['nFC'], res['nCX']
@@ -152,8 +202,6 @@ def ESCAPE_solve(
         # On [psi_ped, 1] the tanh shape peaks at psi_ped; aT0 is fixed so
         # T(psi_ped) = Te_ped derived from EPED pedestal pressure (p_ped =
         # 2 * ne_ped * Te_ped, Ti = Te, Zeff ~ 1).
-        tanh_width_new = psi_to_x(1-pedestal_width) * -1
-        sc_params['tanh_width'] = tanh_width_new
         Delta = float(pedestal_width)
         psi_mid = 1.0 - 0.5 * Delta
         psi_ped = 1.0 - Delta

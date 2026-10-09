@@ -454,8 +454,8 @@ class OneDSolverMixin:
                        tau_par=None,
                        dne_dx_neginf=None,
                        initial_guess="pfile",
-                       tanh_width=None,
                        tanh_center=None,
+                       x_pwg=None,
                        eq6_form="complete",
                        first_step="auto",
                        picard_max_it=50,
@@ -531,14 +531,14 @@ class OneDSolverMixin:
         x_grid = L * xi_grid
         ne_init = bcig.build_ne_initial_guess(
             self, x_grid, initial_guess, nebcs,
-            tanh_width=tanh_width, tanh_center=tanh_center,
+            tanh_center=tanh_center,
+            x_pwg=x_pwg,
         )
         self.ne_init = ne_init
 
-        # KBM diffusivity frozen from the initial guess for the first step.
-        # dne_method="Saarelma2023" also takes D_SOL from it, so that
-        # Neumann value is frozen for the whole solve (not refreshed by
-        # the Picard loop).
+        # KBM diffusivity from the initial guess for the first step.
+        # dne_method="Saarelma2023" also takes D_SOL from it; both are
+        # refreshed from the previous iterate on every Picard iteration.
         self.calc_D_KBM_average_sc(ne_init, x_grid,
                                    gate_mode=picard_gate_mode)
         D_KBM_frozen = self._D_KBM.copy()
@@ -701,6 +701,14 @@ class OneDSolverMixin:
             self._D_KBM = D_KBM_frozen
             f0_x, f1_x, df0_x, df1_x = _build_f_interp(D_KBM_frozen)
 
+            # dne_method="Saarelma2023": D_SOL = D_ped(0) depends on D_KBM,
+            # so refresh the separatrix Neumann value with it (bc / _solve
+            # read dN_bc at call time).  A no-op for the other methods.
+            bcig.resolve_saarelma2023_neumann(self, nebcs, self.x_init,
+                                              D_KBM_frozen,
+                                              require_negative_slope=True)
+            dN_bc = (L / n0) * nebcs.dne_dx
+
             def ode_full(xi, Y):
                 N, dN = Y
                 x, F, C_K, C_N = _conductance(
@@ -743,12 +751,16 @@ class OneDSolverMixin:
                 "alpha_frac_above": float(self.alpha_frac_above),
                 "kbm_gate_on": gate_now,
                 "dne_rel": float(dn_rel),
+                "D_sol": nebcs.D_sol,
+                "dne_dx_bc": float(nebcs.dne_dx),
             })
             if v:
+                d_sol_str = ("" if nebcs.D_sol is None
+                             else f", D_SOL = {nebcs.D_sol:.4e}")
                 print(
                     f"[sc scipy] picard it {it:3d}: |dne|_rel = {dn_rel:.3e}, "
                     f"alpha_bar = {self.alpha_bar_ped:.4f}, "
-                    f"KBM {'ON' if gate_now else 'OFF'}"
+                    f"KBM {'ON' if gate_now else 'OFF'}{d_sol_str}"
                 )
             if dn_rel < float(picard_rtol) and gate_now == prev_gate:
                 picard_converged = True
@@ -859,8 +871,8 @@ class OneDSolverMixin:
                            grad_bc_max_it=25,
                            grad_bc_seed=None,
                            initial_guess="pfile",
-                           tanh_width=None,
                            tanh_center=None,
+                           x_pwg=None,
                            eq6_form="complete",
                            first_step="auto",
                            picard_max_it=50,
@@ -934,7 +946,8 @@ class OneDSolverMixin:
         # Initial guess (SI on the sorted grid, then back to DOF order).
         ne_init_sorted = bcig.build_ne_initial_guess(
             self, x_sorted, initial_guess, nebcs,
-            tanh_width=tanh_width, tanh_center=tanh_center,
+            tanh_center=tanh_center,
+            x_pwg=x_pwg,
         )
         ne_init = ne_init_sorted[unsort_idx]
         self.ne_init = ne_init

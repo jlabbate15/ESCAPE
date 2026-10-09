@@ -129,6 +129,10 @@ _PROFILE_ORIGIN = "state.n_e profile"
 _USER_ORIGIN = "user-specified"
 _SAARELMA_ORIGIN = "Saarelma 2023 Eq. (20)"
 
+# |tanh argument| of the "tanh" initial guess at the endpoint nearer to
+# tanh_center (tanh(2) ~ 0.96), which sets the tanh width from the centre.
+_TANH_EDGE_ARG = 2.0
+
 
 @dataclass
 class NeBCs:
@@ -211,7 +215,7 @@ class NeBCs:
                      else f"{self.D_sol:.3e} m^2/s")
             out += (f"{prefix}tau_par          = {self.tau_par:.3e} s\n"
                     f"{prefix}D_SOL = D_ped(0) = {D_sol}  "
-                    f"(frozen from the initial guess)\n")
+                    f"(initial guess; solve_sc_scipy refreshes it per Picard it)\n")
         return out + (
             f"{prefix}ne(x_inner)      = {self.ne_inner_guess:.3e} m^-3  "
             f"(initial guess only, {self.ne_inner_origin})"
@@ -439,9 +443,11 @@ def resolve_saarelma2023_neumann(state, bcs, x_D_KBM, D_KBM,
         dn_e/dx|_0 = -n_e(0) / sqrt(D_SOL tau_par),
         D_SOL = D_ped(0) = D_NEO(0) + D_KBM(0) + C_ETG(0) / n_e(0).
 
-    Solvers call this once, with the D_KBM built from the n_e initial
-    guess and before the KBM Picard loop, so the condition is frozen for
-    the whole solve.  A no-op for the other methods.
+    Solvers call this with the D_KBM built from the n_e initial guess
+    before the KBM Picard loop.  ``solve_sc_scipy`` calls it again on
+    every Picard iteration with the refreshed D_KBM, so D_SOL evolves
+    with the iterates; the other solvers keep it frozen for the whole
+    solve.  A no-op for the other methods.
 
     Parameters
     ----------
@@ -490,7 +496,7 @@ def resolve_saarelma2023_neumann(state, bcs, x_D_KBM, D_KBM,
 
 
 def build_ne_initial_guess(state, x_grid, initial_guess, bcs,
-                           tanh_width=None, tanh_center=None):
+                           tanh_center=None, x_pwg=None):
     """SI electron-density initial guess (m^-3) on ``x_grid`` (m).
 
     Shapes are anchored on the resolved boundary conditions: every option
@@ -503,12 +509,31 @@ def build_ne_initial_guess(state, x_grid, initial_guess, bcs,
         Used only by the profile-reading options.
     x_grid : array_like
         SI radial grid (m), 0 at the separatrix.  Need not be sorted.
-    initial_guess : {"pfile", "linear", "tanh"}
+    initial_guess : {"state", "linear", "tanh", "tanh_linear"}
     bcs : NeBCs
         From :func:`resolve_ne_bcs`.
-    tanh_width, tanh_center : float or None
-        ``"tanh"`` shape parameters in SI metres.  Defaults: a width of
-        10% of the domain and a centre one width inside the separatrix.
+    tanh_center : float or None
+        Centre (SI m, strictly inside (x_inner, 0)) of the ``"tanh"``
+        guess, its only shape parameter; None puts it at the midpoint.
+        The tanh meets ``bcs.ne_inner_guess`` at x_inner and
+        ``bcs.ne_outer`` at x = 0 exactly, and its half-width is the
+        distance from the centre to the nearer endpoint divided by
+        ``_TANH_EDGE_ARG``.  A centred tanh is symmetric with the
+        smallest slopes; a centre near 0 stays flat and then drops
+        steeply to ne_outer, and a centre near x_inner drops steeply
+        first and then flattens towards the separatrix.
+    x_pwg : float or None
+        Pedestal top (SI m, strictly inside (x_inner, 0)) of the
+        ``"tanh_linear"`` guess, e.g. psi_N = 1 - pedestal width.  That
+        guess is the line L(x) through ``bcs.ne_inner_guess`` at x_inner
+        with the ``state.n_e`` slope dn_e/dx at x_inner, plus, on
+        [x_pwg, 0], ``(ne_outer - L(0)) S(x)``.  S is a tanh centred at
+        x_pwg/2 (half-width |x_pwg|/(2 _TANH_EDGE_ARG)) minus its tangent
+        line at x_pwg, rescaled so S(x_pwg) = S'(x_pwg) = 0 and S(0) = 1:
+        n_e and dn_e/dx are both continuous at x_pwg and the guess meets
+        ``bcs.ne_outer`` at the separatrix.  S is monotone (the tanh slope
+        on [x_pwg, 0] is never below its value at x_pwg), so the guess
+        falls monotonically when L(0) > ne_outer.
     """
     x_grid = np.asarray(x_grid, dtype=float)
     x_left = float(bcs.x_inner)
@@ -525,13 +550,48 @@ def build_ne_initial_guess(state, x_grid, initial_guess, bcs,
         return np.interp(x_grid, psi_to_x(state.psi_ne_eval), state.n_e)
 
     if initial_guess == "tanh":
-        width = (float(tanh_width) if tanh_width is not None
-                 else 0.1 * abs(x_left))
-        if width <= 0:
-            raise ValueError(f"tanh_width must be positive, got {width}.")
-        center = float(tanh_center) if tanh_center is not None else -width
-        s_ne = 0.5 * (1.0 - np.tanh((x_grid - center) / (0.5 * width)))
+        center = (0.5 * (x_left + x_right) if tanh_center is None
+                  else float(tanh_center))
+        if not (x_left < center < x_right):
+            raise ValueError(
+                f"tanh_center = {center} m must lie strictly inside "
+                f"(x_inner, 0) = ({x_left}, {x_right}) m."
+            )
+        # Width from the nearer endpoint: the tanh saturates (flattens) on
+        # the far side and is steepest next to the nearer one.
+        h = min(center - x_left, x_right - center) / _TANH_EDGE_ARG
+        t = np.tanh((x_grid - center) / h)
+        t_in = np.tanh((x_left - center) / h)
+        t_out = np.tanh((x_right - center) / h)
+        # Rescaled so s_ne is exactly 1 at x_inner and 0 at the separatrix.
+        s_ne = (t_out - t) / (t_out - t_in)
         return ne_outer_val + (ne_inner_val - ne_outer_val) * s_ne
+
+    if initial_guess == "tanh_linear":
+        if x_pwg is None:
+            raise ValueError('initial_guess="tanh_linear" needs x_pwg.')
+        x_p = float(x_pwg)
+        if not (x_left < x_p < x_right):
+            raise ValueError(
+                f"x_pwg = {x_p} m must lie strictly inside "
+                f"(x_inner, 0) = ({x_left}, {x_right}) m."
+            )
+        # Linear inboard piece: ne_inner and the profile slope at x_inner.
+        slope = _profile_gradient_at(state, x_left)
+        line = ne_inner_val + slope * (x_grid - x_left)
+        line_0 = ne_inner_val + slope * (x_right - x_left)
+        # Step over [x_pwg, 0]: a tanh minus its tangent line at x_pwg, so
+        # the step and its slope are both 0 at x_pwg; rescaled to 1 at 0.
+        center = 0.5 * (x_p + x_right)
+        h = (x_right - center) / _TANH_EDGE_ARG
+
+        def _bump(xx):
+            t_p = np.tanh((x_p - center) / h)
+            dt_p = (1.0 - t_p ** 2) / h
+            return np.tanh((xx - center) / h) - t_p - dt_p * (xx - x_p)
+
+        step = np.where(x_grid >= x_p, _bump(x_grid) / _bump(x_right), 0.0)
+        return line + (ne_outer_val - line_0) * step
 
     raise ValueError(
         f"Unknown initial_guess={initial_guess!r}."
