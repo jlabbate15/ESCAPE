@@ -2,7 +2,7 @@
 Ionisation (SCD) and charge-exchange (CCD) rate coefficients from local
 RADAS ADF11 dumps under ``radas_dir/data_files/``.
 
-API matches ``src.adas.adas_ionisation.scd_adas`` / ``src.adas.adas_cx.scx_adas``:
+API matches ``escape.adas.adas_ionisation.scd_adas`` / ``escape.adas.adas_cx.scx_adas``:
 inputs ``ne`` [m^-3], ``Te`` [eV]; outputs rate coefficients [m^3/s].
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import os
 
 import numpy as np
 
-from src.adas.adas_ionisation import make_adf11_interpolator
+from escape.adas.adas_ionisation import make_adf11_interpolator
 
 RADAS_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(RADAS_DIR, 'radas_dir', 'data_files')

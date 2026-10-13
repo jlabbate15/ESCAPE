@@ -98,7 +98,7 @@ class epednn_class:
             # 1. Tell juliapkg to add your local EPEDNN package in development mode.
             # This registers it with the isolated Julia environment PythonCall uses.
             epednn_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), # ESCAPE root (src/epednn/..)
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), # ESCAPE root (src/escape/epednn/..)
                 "dependencies",
                 "EPEDNN.jl",
             )
@@ -176,7 +176,7 @@ class epednn_class:
             import sys
             import importlib
             from pathlib import Path
-            epednn_root = Path(__file__).resolve().parents[2] / "dependencies" / "epednn_mit" # ESCAPE root (src/epednn/..)
+            epednn_root = Path(__file__).resolve().parents[3] / "dependencies" / "epednn_mit" # ESCAPE root (src/escape/epednn/..)
             epednn_src = epednn_root / "src"
             if not epednn_src.is_dir():
                 raise FileNotFoundError(

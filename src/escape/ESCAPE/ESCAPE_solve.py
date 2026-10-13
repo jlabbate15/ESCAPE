@@ -7,9 +7,9 @@ import shutil
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.interpolate import interp1d
 
-ROOT = Path(__file__).resolve().parents[2]  # ESCAPE root (src/ESCAPE/..)
+ROOT = Path(__file__).resolve().parents[3]  # ESCAPE root (src/escape/ESCAPE/..)
 sys.path.insert(0, str(ROOT))
-from src.ESCAPE.ESCAPE_api import ESCAPE
+from escape.ESCAPE.ESCAPE_api import ESCAPE
 from helpers.ped_width_proxy import ped_width
 
 
