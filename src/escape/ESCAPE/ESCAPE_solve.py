@@ -53,8 +53,11 @@ def ESCAPE_solve(
         initial guess. On the first ESCAPE iteration it is mapped to the SI x
         grid, clipped to lie inside (x_inner, 0), and stored as
         sc_params['x_pwg'].
-    out_dir : str
+    out_dir : str or None
         Path to directory to save successful solutions from the Saarelma-Connor model.
+        The directory is emptied first, then gets one ne_and_Te_iter_{k}.npy file
+        per ESCAPE iteration. With None, no directory is made or emptied and no
+        iteration file is saved.
     epednn_model : object or None
         An already loaded EPEDNN model, for example from
         escape.epednn.epednn_call.load_epednn_model. It must be of the model
@@ -62,8 +65,8 @@ def ESCAPE_solve(
         how to call it by that name. None loads the model in setup_epednn.
     on_iteration : callable or None
         Called as on_iteration(ESCAPE_iter, sol) at the end of each ESCAPE
-        iteration, after the iteration file is saved. sol is a shallow copy of
-        the saved dict plus two keys that are not saved:
+        iteration, after the iteration file is saved (if out_dir is given). sol is
+        a shallow copy of the iteration dict plus two keys that are not saved:
         'betan' (array of shape (1,), from feed_epednn) and
         'T_e_pres' (eV, on sol['psi_N']), the T_e that the Saarelma-Connor
         solve used; sol['T_e'] is the updated profile (keV, on
@@ -93,13 +96,14 @@ def ESCAPE_solve(
     print("One-time EPEDNN setup was successful.")
 
     # Clear outputs from any previous scan (including appended failure logs) and setup logging files
-    out_dir_p = Path(out_dir)
-    out_dir_p.mkdir(parents=True, exist_ok=True)
-    for path in out_dir_p.iterdir(): # clear output directory
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
+    if out_dir is not None:
+        out_dir_p = Path(out_dir)
+        out_dir_p.mkdir(parents=True, exist_ok=True)
+        for path in out_dir_p.iterdir(): # clear output directory
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
 
     # Parameters to be used in the loop
     psi_N_Te_new = None
@@ -280,7 +284,8 @@ def ESCAPE_solve(
         sol['model'] = res['model']
         sol['implementation'] = res['implementation']
         sol['diagnostics'] = res['diagnostics']
-        np.save(f'{out_dir_p}/ne_and_Te_iter_{ESCAPE_iter}.npy', sol, allow_pickle=True)
+        if out_dir is not None:
+            np.save(f'{out_dir_p}/ne_and_Te_iter_{ESCAPE_iter}.npy', sol, allow_pickle=True)
         if on_iteration is not None:
             on_iteration(ESCAPE_iter, {**sol, 'betan': betan, 'T_e_pres': T_e_pres})
 
