@@ -32,6 +32,7 @@ def ESCAPE_solve(
     out_dir = None, # directory to output files
     verbose = False,
     epednn_model = None, # already loaded EPEDNN model (see load_epednn_model); None loads it here
+    on_iteration = None, # callable(ESCAPE_iter, sol), called once per ESCAPE iteration
 ):
     """Solve the self-consistent pedestal problem using the EPEDNN model and the Saarelma-Connor model.
 
@@ -59,6 +60,16 @@ def ESCAPE_solve(
         escape.epednn.epednn_call.load_epednn_model. It must be of the model
         named in epednn_params['epednn_model'], because feed_epednn selects
         how to call it by that name. None loads the model in setup_epednn.
+    on_iteration : callable or None
+        Called as on_iteration(ESCAPE_iter, sol) at the end of each ESCAPE
+        iteration, after the iteration file is saved. sol is a shallow copy of
+        the saved dict plus two keys that are not saved:
+        'betan' (array of shape (1,), from feed_epednn) and
+        'T_e_pres' (eV, on sol['psi_N']), the T_e that the Saarelma-Connor
+        solve used; sol['T_e'] is the updated profile (keV, on
+        sol['psi_Te_eval']). The arrays and sol['SOLVE_KW'] (the sc_params
+        dict) are shared with the running solve, so a callback that keeps
+        values must copy them.
     """
 
     state = ESCAPE(
@@ -270,6 +281,8 @@ def ESCAPE_solve(
         sol['implementation'] = res['implementation']
         sol['diagnostics'] = res['diagnostics']
         np.save(f'{out_dir_p}/ne_and_Te_iter_{ESCAPE_iter}.npy', sol, allow_pickle=True)
+        if on_iteration is not None:
+            on_iteration(ESCAPE_iter, {**sol, 'betan': betan, 'T_e_pres': T_e_pres})
 
         if ESCAPE_iter > 0:
             if abs(eped_tol) < ESCAPE_tol_max:
