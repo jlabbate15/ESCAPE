@@ -16,7 +16,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.solver_nondim import saarelma_connor_nondim
+from escape.solver_nondim import saarelma_connor_nondim
 
 MHD_FP = Path("/mnt/homes_global/jal2351/software/sc_inputs/CAKEgeqdsks/g158091.01935")
 KPROF_FP = Path("/mnt/homes_global/jal2351/software/sc_inputs/CAKEpfiles/p158091.01935")

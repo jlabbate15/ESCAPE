@@ -6,7 +6,7 @@ import pickle # to check which state attributes np.save can store
 import netCDF4 as nc # OMFIT profile files are netCDF
 ROOT = Path.cwd().parent.parent.parent
 sys.path.insert(0, str(ROOT))
-from src.ESCAPE.ESCAPE_solve import ESCAPE_solve
+from escape.ESCAPE.ESCAPE_solve import ESCAPE_solve
 from escape.helpers.load_equil import initialize_inputs
 from examples.device_prediction.helper_functions import calc_pressure_profile
 import time

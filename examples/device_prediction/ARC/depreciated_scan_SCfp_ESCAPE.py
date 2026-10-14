@@ -6,7 +6,7 @@ from pathlib import Path
 import urllib.request # needed for geqdsk import
 ROOT = Path.cwd().parent.parent.parent.parent
 sys.path.insert(0, str(ROOT))
-from src.profiles_loop_solve import profiles_loop_solve
+from escape.profiles_loop_solve import profiles_loop_solve
 
 from examples.device_prediction.helper_functions import calc_pressure_profile
 

@@ -7,7 +7,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent # ESCAPE root (tests/DIIID_Dunsmore_validate/..)
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
-from src.ESCAPE.ESCAPE_solve import ESCAPE_solve
+from escape.ESCAPE.ESCAPE_solve import ESCAPE_solve
 from examples.device_prediction.helper_functions import calc_pressure_profile
 from escape.helpers.ped_width_proxy import ped_center, ped_width
 from parse_dunsmore_db import (DB_PATH, EQDSK_DIR, load_db, load_equilibrium, build_kprof,
