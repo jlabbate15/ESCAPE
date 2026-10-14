@@ -30,11 +30,11 @@ ncx_x0_ratios = np.array([15])
 sc_model = os.environ.get('SC_MODEL', '1D')
 sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'scipy')
 ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'outer')
-picard_relax = float(os.environ.get('PICARD_RELAX', 0.5))
+picard_relax = float(os.environ.get('PICARD_RELAX', 1.0))
 picard_max_it = int(os.environ.get('PICARD_MAX_IT', 50))
 run_suffix = os.environ.get('RUN_SUFFIX', '_V4_fullP')
 
-output_dir = f'outputs/DIIIDDunsmore_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}{run_suffix}'
+output_dir = f'outputs/DIIIDDunsmore_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}{run_suffix}_moregrid'
 # ----------------------------------------------------------------
 
 
@@ -141,7 +141,7 @@ sc_params = {
 
 # Saarelma-Connor (SC) shared solver parameters
 sc_params.update({
-    'x_res':40,
+    'x_res':400,
     'ne_grad_bc_loc':ne_grad_bc_loc,
     # 'Saarelma2023' (Eq. 20 separatrix gradient) needs the Neumann BC at the
     # separatrix, so the 'inner' runs fall back to the state.n_e gradient

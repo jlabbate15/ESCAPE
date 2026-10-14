@@ -167,7 +167,7 @@ def ESCAPE_solve(
         delta = ne_ped_at_top - n_e_core_at_ped
         n_e_core = _n_e_core + delta # change core stiffly to match pedestal top
         
-        # Calculate total n_e and T_e
+        # Calculate total n_e
         psi_N_ped = interp1d(state.x_init, state.psi_N_pres, kind='linear', bounds_error=False, fill_value='extrapolate')(x_sol)
         psi_N_plasma = np.concatenate([psi_N_core[:-1], psi_N_ped])
         n_e_plasma = np.concatenate([n_e_core[:-1], ne_sol])

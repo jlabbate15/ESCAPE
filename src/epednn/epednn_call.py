@@ -204,7 +204,7 @@ class epednn_class:
 
         self.bt = np.array(self.calc_B(self.eq['raxis'],self.eq['zaxis'])[1][2])
 
-    def feed_epednn(self, model='EPED1', pres_gfile=False, ne_ped_h=None, psin_ped=None):
+    def feed_epednn(self, model='EPED1', pres_gfile=False, ne_ped_h=None, psin_ped=None, betan_scale=None):
         """Run the EPEDNN model
         
         parameters
@@ -223,8 +223,10 @@ class epednn_class:
             self.ne_ped_h = interp1d(self.psi_ne_eval,self.n_e, kind='linear', bounds_error=False, fill_value='extrapolate')(1-psin_ped)
         else:
             raise NotImplementedError('need to specify either a radial location of or the actual value of the density to give to EPEDNN as ne_ped')
-        
+
         self.calc_betan(pres_gfile)
+        if betan_scale is not None:
+            self.betan = self.betan * betan_scale 
         print(f'betan: {self.betan}')
 
         inputs = {
