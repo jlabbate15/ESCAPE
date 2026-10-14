@@ -23,13 +23,13 @@ Differences from fit_pedestals.py, needed for Saarelma-Connor output:
     Widths are returned in the units of the input coordinate.
 
 Usage:
-    from src.ped_width_proxy import ped_width
+    from escape.helpers.ped_width_proxy import ped_width
     width = ped_width(psi_N, n_e)                  # mean of tanh and grad (default)
     width = ped_width(psi_N, n_e, method='all')    # mean of tanh, grad and lin
     width = ped_width(psi_N, n_e, method='grad+lin')  # any two methods
     width = ped_width(psi_N, n_e, method='tanh')   # a single method
 
-    from src.ped_width_proxy import ped_width_all
+    from escape.helpers.ped_width_proxy import ped_width_all
     res = ped_width_all(psi_N, n_e)           # per-method widths + fit details
 """
 import numpy as np

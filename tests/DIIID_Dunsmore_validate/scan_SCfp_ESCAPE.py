@@ -7,9 +7,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent # ESCAPE root (tests/DIIID_Dunsmore_validate/..)
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
-from src.ESCAPE.ESCAPE_solve import ESCAPE_solve
+from escape.ESCAPE.ESCAPE_solve import ESCAPE_solve
 from examples.device_prediction.helper_functions import calc_pressure_profile
-from helpers.ped_width_proxy import ped_center, ped_width
+from escape.helpers.ped_width_proxy import ped_center, ped_width
 from parse_dunsmore_db import (DB_PATH, EQDSK_DIR, load_db, load_equilibrium, build_kprof,
                                kprof_to_profiles, experimental_data, heating_power)
 import time
@@ -80,7 +80,7 @@ ELECTRON_FRAC = 1     # Saarelma et al. take ~half the heating as the electron c
 # ── Experimental n_e -> SC inputs ────────────────────────────────────────────
 # ne_outer (ESCAPE ne_x0) is the experimental n_e at psi_N = 1, and the tanh
 # initial-guess centre is psi_N = 1 - width/2 of the experimental pedestal
-# (helpers/ped_width_proxy.ped_center, fitted on psi_N >= psi_N_inner_boundary);
+# (src/escape/helpers/ped_width_proxy.ped_center, fitted on psi_N >= psi_N_inner_boundary);
 # ESCAPE_solve maps that psi_N onto the SI x grid for sc_params['tanh_center'].
 PED_CENTER_METHOD = 'tanh+grad' # ped_width_proxy method(s) averaged for the pedestal width
 USE_EXP_TANH_CENTER = True # False: tanh_center=None (midpoint default) for every equilibrium

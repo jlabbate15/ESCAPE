@@ -35,10 +35,10 @@ FREE_PARAMS = dict(alpha_crit=3.0, C_KBM=1.0, De_chie_etg=1.0, nFC_x0=1e16)
 
 
 def check_assembly():
-    from src.solver import SaarelmaConnorBase
-    from src.solver_nondim import NondimSolverMixin
-    from src.solver_sc import SCSolverMixin
-    from src.solver_api import saarelma_connor
+    from escape.solver import SaarelmaConnorBase
+    from escape.solver_nondim import NondimSolverMixin
+    from escape.solver_sc import SCSolverMixin
+    from escape.solver_api import saarelma_connor
 
     parts = (SaarelmaConnorBase, NondimSolverMixin, SCSolverMixin)
     methods = [{n for n, v in vars(c).items() if callable(v) and not n.startswith("__")}
@@ -59,16 +59,16 @@ def check_aliases():
     # Each import order runs in a fresh interpreter, since the whole point is
     # which module happens to be imported first.
     orders = {
-        "solver_api first": "import src.solver_api as a; from src.solver_nondim import saarelma_connor_nondim as n; from src.solver_sc import saarelma_connor_sc as s",
-        "nondim alias first": "from src.solver_nondim import saarelma_connor_nondim as n; from src.solver_sc import saarelma_connor_sc as s; import src.solver_api as a",
-        "sc alias first": "from src.solver_sc import saarelma_connor_sc as s; from src.solver_nondim import saarelma_connor_nondim as n; import src.solver_api as a",
+        "solver_api first": "import escape.solver_api as a; from escape.solver_nondim import saarelma_connor_nondim as n; from escape.solver_sc import saarelma_connor_sc as s",
+        "nondim alias first": "from escape.solver_nondim import saarelma_connor_nondim as n; from escape.solver_sc import saarelma_connor_sc as s; import escape.solver_api as a",
+        "sc alias first": "from escape.solver_sc import saarelma_connor_sc as s; from escape.solver_nondim import saarelma_connor_nondim as n; import escape.solver_api as a",
     }
     for label, imports in orders.items():
         code = (f"import sys; sys.path.insert(0, {str(ROOT)!r}); {imports}; "
                 "assert n is a.saarelma_connor and s is a.saarelma_connor; "
-                "from src.solver import saarelma_connor_base, SaarelmaConnorBase; "
+                "from escape.solver import saarelma_connor_base, SaarelmaConnorBase; "
                 "assert saarelma_connor_base is SaarelmaConnorBase; "
-                "import src.solver_sc as m\n"
+                "import escape.solver_sc as m\n"
                 "try:\n    m.not_a_real_name\nexcept AttributeError:\n    pass\n"
                 "else:\n    raise AssertionError('module __getattr__ swallowed an unknown name')\n"
                 "print('ALIASES_OK')")
@@ -78,7 +78,7 @@ def check_aliases():
 
 
 def check_kwarg_validation():
-    from src.solver_api import saarelma_connor
+    from escape.solver_api import saarelma_connor
 
     # Dispatch and validation happen before any solver touches the
     # equilibrium, so an uninitialised instance is enough here.
@@ -115,7 +115,7 @@ def check_kwarg_validation():
 
 
 def check_solves():
-    from src.solver_api import saarelma_connor
+    from escape.solver_api import saarelma_connor
 
     m = saarelma_connor(P_tot_e=5e6, ncx_x0_ratio=1.0, mhd_fp=MHD_FP,
                         kprof_fp=KPROF_FP, verbose=False, **FREE_PARAMS)

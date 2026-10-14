@@ -12,8 +12,8 @@ import numpy as np
 
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.profiles_loop_solve import profiles_loop_solve
-from ESCAPE.helpers.load_equil import initialize_inputs
+from escape.profiles_loop_solve import profiles_loop_solve
+from escape.helpers.load_equil import initialize_inputs
 
 
 # ------------------------------------------------------------

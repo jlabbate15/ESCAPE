@@ -9,8 +9,8 @@ from pathlib import Path
 
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.solver_nondim import saarelma_connor_nondim
-from ESCAPE.helpers.load_equil import initialize_inputs
+from escape.solver_nondim import saarelma_connor_nondim
+from escape.helpers.load_equil import initialize_inputs
 
 out_dir = 'EPEDNN_pure_output_v3/'
 

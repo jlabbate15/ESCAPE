@@ -4,10 +4,10 @@ from scipy.interpolate import RectBivariateSpline, interp1d
 from scipy.integrate import simpson, cumulative_trapezoid
 from scipy import constants
 import matplotlib.pyplot as plt
-from src.adas.adas_ionisation import scd_adas
-from src.adas.adas_cx import scx_adas
-from src.radas.radas_rates import scd_radas, scx_radas
-from src.ESCAPE.ESCAPE_state import ESCAPE_state
+from escape.adas.adas_ionisation import scd_adas
+from escape.adas.adas_cx import scx_adas
+from escape.radas.radas_rates import scd_radas, scx_radas
+from escape.ESCAPE.ESCAPE_state import ESCAPE_state
 try:
     from firedrake import (
         IntervalMesh, FunctionSpace, MixedFunctionSpace, Function,
@@ -1239,7 +1239,7 @@ class SaarelmaConnorBase:
             raise AttributeError(
                 f"{type(self).__name__} has no {entry_point!r}; model="
                 f"{model!r} needs the corresponding solver mixin. Build the "
-                f"model from src.saarelma_connor.saarelma_connor_api.saarelma_connor."
+                f"model from escape.saarelma_connor.saarelma_connor_api.saarelma_connor."
             ) from None
 
         return solver(implementation=implementation, **kwargs)
@@ -1318,5 +1318,5 @@ class SaarelmaConnorBase:
 
 
 #: Backwards-compatible alias for the pre-refactor base-class name.  The
-#: full model (base + both solver mixins) is src.saarelma_connor.saarelma_connor_api.saarelma_connor.
+#: full model (base + both solver mixins) is escape.saarelma_connor.saarelma_connor_api.saarelma_connor.
 saarelma_connor_base = SaarelmaConnorBase

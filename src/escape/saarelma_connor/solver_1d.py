@@ -19,7 +19,7 @@ except Exception as _firedrake_import_err:
     _FIREDRAKE_AVAILABLE = False
     _FIREDRAKE_IMPORT_ERR = _firedrake_import_err
 
-from src.saarelma_connor import bc_ig_helpers as bcig
+from escape.saarelma_connor import bc_ig_helpers as bcig
 
 
 # Conversion constant (eV -> J)

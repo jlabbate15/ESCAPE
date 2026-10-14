@@ -1,5 +1,4 @@
 # Loop between EPEDNN and coupled version of Saarelma-Connor model to find self-consistent pedestal
-import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,10 +6,8 @@ import shutil
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.interpolate import interp1d
 
-ROOT = Path(__file__).resolve().parents[2]  # ESCAPE root (src/ESCAPE/..)
-sys.path.insert(0, str(ROOT))
-from src.ESCAPE.ESCAPE_api import ESCAPE
-from helpers.ped_width_proxy import ped_width
+from escape.ESCAPE.ESCAPE_api import ESCAPE
+from escape.helpers.ped_width_proxy import ped_width
 
 
 def ESCAPE_solve(
@@ -34,6 +31,8 @@ def ESCAPE_solve(
     ESCAPE_tol_max = 1e-5,
     out_dir = None, # directory to output files
     verbose = False,
+    epednn_model = None, # already loaded EPEDNN model (see load_epednn_model); None loads it here
+    on_iteration = None, # callable(ESCAPE_iter, sol), called once per ESCAPE iteration
 ):
     """Solve the self-consistent pedestal problem using the EPEDNN model and the Saarelma-Connor model.
 
@@ -54,8 +53,26 @@ def ESCAPE_solve(
         initial guess. On the first ESCAPE iteration it is mapped to the SI x
         grid, clipped to lie inside (x_inner, 0), and stored as
         sc_params['x_pwg'].
-    out_dir : str
+    out_dir : str or None
         Path to directory to save successful solutions from the Saarelma-Connor model.
+        The directory is emptied first, then gets one ne_and_Te_iter_{k}.npy file
+        per ESCAPE iteration. With None, no directory is made or emptied and no
+        iteration file is saved.
+    epednn_model : object or None
+        An already loaded EPEDNN model, for example from
+        escape.epednn.epednn_call.load_epednn_model. It must be of the model
+        named in epednn_params['epednn_model'], because feed_epednn selects
+        how to call it by that name. None loads the model in setup_epednn.
+    on_iteration : callable or None
+        Called as on_iteration(ESCAPE_iter, sol) at the end of each ESCAPE
+        iteration, after the iteration file is saved (if out_dir is given). sol is
+        a shallow copy of the iteration dict plus two keys that are not saved:
+        'betan' (array of shape (1,), from feed_epednn) and
+        'T_e_pres' (eV, on sol['psi_N']), the T_e that the Saarelma-Connor
+        solve used; sol['T_e'] is the updated profile (keV, on
+        sol['psi_Te_eval']). The arrays and sol['SOLVE_KW'] (the sc_params
+        dict) are shared with the running solve, so a callback that keeps
+        values must copy them.
     """
 
     state = ESCAPE(
@@ -75,17 +92,18 @@ def ESCAPE_solve(
     )
     print("Initial state built.")
 
-    state.setup_epednn(model=epednn_params['epednn_model'])
+    state.setup_epednn(model=epednn_params['epednn_model'], epednn_model=epednn_model)
     print("One-time EPEDNN setup was successful.")
 
     # Clear outputs from any previous scan (including appended failure logs) and setup logging files
-    out_dir_p = Path(out_dir)
-    out_dir_p.mkdir(parents=True, exist_ok=True)
-    for path in out_dir_p.iterdir(): # clear output directory
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
+    if out_dir is not None:
+        out_dir_p = Path(out_dir)
+        out_dir_p.mkdir(parents=True, exist_ok=True)
+        for path in out_dir_p.iterdir(): # clear output directory
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
 
     # Parameters to be used in the loop
     psi_N_Te_new = None
@@ -266,7 +284,10 @@ def ESCAPE_solve(
         sol['model'] = res['model']
         sol['implementation'] = res['implementation']
         sol['diagnostics'] = res['diagnostics']
-        np.save(f'{out_dir_p}/ne_and_Te_iter_{ESCAPE_iter}.npy', sol, allow_pickle=True)
+        if out_dir is not None:
+            np.save(f'{out_dir_p}/ne_and_Te_iter_{ESCAPE_iter}.npy', sol, allow_pickle=True)
+        if on_iteration is not None:
+            on_iteration(ESCAPE_iter, {**sol, 'betan': betan, 'T_e_pres': T_e_pres})
 
         if ESCAPE_iter > 0:
             if abs(eped_tol) < ESCAPE_tol_max:

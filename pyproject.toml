@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Install from the repository root with:  pip install -e .
+# Only editable installs are supported: ESCAPE finds dependencies/EPEDNN.jl and
+# dependencies/epednn_mit relative to its source files.
+#
+# Install these separately when you need them:
+#   firedrake          - 3D model, or implementation='firedrake'
+#   epednn_mit         - EPED_SPARC (dependencies/epednn_mit)
+#   OpenFUSIONToolkit  - escape.helpers g-file loading
+#   omfit_classes      - escape.helpers profile loading
+
+[project]
+name = "escape"
+version = "0.1.0"
+description = "EPED Saarelma-Connor Adapted Pedestal Evolution (ESCAPE) pedestal model"
+readme = "README.txt"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+eped1 = ["juliacall", "juliapkg"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["escape*"]
+
+[tool.setuptools.package-data]
+"escape.adas" = ["*.dat"]
+"escape.radas" = ["radas_dir/data_files/*.dat"]

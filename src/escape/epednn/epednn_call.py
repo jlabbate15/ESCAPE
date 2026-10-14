@@ -5,6 +5,135 @@ from scipy import constants
 import os
 
 
+def load_epednn_model(model='EPED1'):
+    """Load an EPEDNN model and return it.
+
+    Parameters
+    ----------
+    model : str
+        'EPED1' (Julia EPEDNN.jl, through juliacall), 'EPED_SPARC' or
+        'EPED_SCOPING' (epednn_mit, TensorFlow)
+
+    Returns
+    -------
+    The model object that feed_epednn uses as self.epednn_model.
+    """
+    if model == 'EPED1':
+        # Requires dependency "juliacall" to translate Python inputs to FUSE EPED.jl
+        # Requires dependency EPEDNN
+
+        import juliapkg
+
+        # 1. Tell juliapkg to add your local EPEDNN package in development mode.
+        # This registers it with the isolated Julia environment PythonCall uses.
+        epednn_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), # ESCAPE root (src/escape/epednn/..)
+            "dependencies",
+            "EPEDNN.jl",
+        )
+        if not os.path.isdir(epednn_path):
+            raise FileNotFoundError(
+                f"EPEDNN.jl not found at {epednn_path}. "
+                "Initialize it with: git submodule update --init dependencies/EPEDNN.jl"
+            )
+        juliapkg.add(
+            "EPEDNN",
+            uuid="e64856f0-3bb8-4376-b4b7-c03396503991",
+            path=epednn_path,
+            dev=True,
+        )
+
+        # 2. Resolve and instantiate. THIS is what fixes your missing dependency error!
+        juliapkg.resolve()
+
+        # 3. Now that the environment is set up, load juliacall and your package
+        from juliacall import Main as jl
+        jl.seval('using EPEDNN')
+
+        # from juliacall import Main as jl
+
+        # 1. Load the Julia EPEDNN module (Assuming EPEDNN is already installed in your Julia environment)
+        '''
+            # To install EPEDNN, run the following command in your terminal:
+            conda activate sc_ped
+            cd /Users/nelsonlab/codes/saarelma-conner-ped
+            julia
+
+            # if you need to install julia, run the following command in your terminal:
+            curl -fsSL https://install.julialang.org | sh
+            # then restart terminal
+            julia --version
+            # if this doesn't work, you could try the following although I did not verify this works:
+            echo 'export PATH="$HOME/.juliaup/bin:$PATH"' >> ~/.zshrc
+            source ~/.zshrc
+            julia --version
+
+            # Then in Julia:
+            using Pkg
+            Pkg.activate(".")  # optional but recommended: use this repo as the active Julia project
+            Pkg.develop(path="dependencies/EPEDNN.jl")
+            Pkg.instantiate()
+
+            #Then in Julia: 
+            using EPEDNN
+
+
+            Make sure that EPEDNN submodule is installed, the General Julia package registry is installed, and juliacall and juliapkg are installed.
+            The following commands may help:
+
+            pip install juliapkg
+            git submodule update --init dependencies/EPEDNN.jl
+            # Only needed if juliapkg fails on registry download:
+            git clone --depth 1 https://github.com/JuliaRegistries/General.git \
+            ~/.julia/registries/General
+            pip install juliacall
+        '''
+        # you can run Julia commands in Python using jl.seval('command')
+        # jl.seval('using Pkg')
+        # jl.seval('Pkg.activate(".")  # optional but recommended: use this repo as the active Julia project')
+        # jl.seval('Pkg.develop(path="/Users/nelsonlab/codes/saarelma-conner-ped/dependencies/EPEDNN.jl")')
+        # jl.seval('Pkg.instantiate()')
+        # jl.seval('using EPEDNN')
+
+        # 2. Load the pre-trained EPED neural network model
+        # This mimics the EPEDNN.loadmodelonce("EPED1NNmodel.bson") step
+        model_filename = "EPED1NNmodel.bson" 
+        return jl.EPEDNN.loadmodelonce(model_filename)
+    elif model in ('EPED_SPARC', 'EPED_SCOPING'):
+        # Vendored package lives at dependencies/epednn_mit/src/epednn_mit/;
+        # it is not installed into the env by default, so put src/ on sys.path.
+        import sys
+        import importlib
+        from pathlib import Path
+        epednn_root = Path(__file__).resolve().parents[3] / "dependencies" / "epednn_mit" # ESCAPE root (src/escape/epednn/..)
+        epednn_src = epednn_root / "src"
+        if not epednn_src.is_dir():
+            raise FileNotFoundError(
+                f"epednn_mit not found at {epednn_src}. "
+                "Expected dependencies/epednn_mit/src in the repo."
+            )
+        if str(epednn_src) not in sys.path:
+            sys.path.insert(0, str(epednn_src))
+        # The two model families share a layout, so select the subpackage by name.
+        subpkg = {'EPED_SPARC': 'sparc', 'EPED_SCOPING': 'scoping'}[model]
+        weights_dir = epednn_src / "epednn_mit" / "models" / subpkg
+        if not weights_dir.is_dir():
+            raise FileNotFoundError(
+                f"epednn_mit model '{subpkg}' not found at {weights_dir}. "
+                "The scoping model lives on the 'scoping_model' branch of the submodule: "
+                "git -C dependencies/epednn_mit checkout scoping_model"
+            )
+        module = importlib.import_module(f"epednn_mit.models.{subpkg}.tensorflow_model")
+        generate = getattr(module, f"generate_epednn_mit_{subpkg}_tensorflow")
+        from epednn_mit.utils.load import load_weights
+        weights = load_weights(sorted(weights_dir.glob(f"*{subpkg}*.pkl")))
+        if not weights:
+            raise FileNotFoundError(f"No *{subpkg}*.pkl weights found in {weights_dir}")
+        return generate(weights)
+    else:
+        raise ValueError(f"Unknown EPEDNN model {model!r}; use 'EPED1', 'EPED_SPARC' or 'EPED_SCOPING'")
+
+
 class epednn_class:
     """Mixin adding the EPEDNN methods
     """
@@ -71,13 +200,17 @@ class epednn_class:
             print(f'betat: {betat}, a: {self.a}, bt: {self.bt}, Ip: {self.Ip}')
         self.betan = 100 * betat * (self.a * abs(self.bt) / abs(self.Ip))
 
-    def setup_epednn(self, model='EPED1'):
+    def setup_epednn(self, model='EPED1', epednn_model=None):
         """Setup the EPEDNN model with quantities from the Saarelma-Connor setup
 
         Parameters
         ----------
         self : object
             instance of saarelma_connor class
+        model : str
+            EPEDNN model name, loaded with load_epednn_model if epednn_model is None
+        epednn_model : object or None
+            An already loaded model of the type that model names. If given, nothing is loaded.
 
         Returns
         -------
@@ -89,118 +222,10 @@ class epednn_class:
 
         print("Setting up EPEDNN...")
 
-        if model == 'EPED1':
-            # Requires dependency "juliacall" to translate Python inputs to FUSE EPED.jl
-            # Requires dependency EPEDNN
-
-            import juliapkg
-
-            # 1. Tell juliapkg to add your local EPEDNN package in development mode.
-            # This registers it with the isolated Julia environment PythonCall uses.
-            epednn_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), # ESCAPE root (src/epednn/..)
-                "dependencies",
-                "EPEDNN.jl",
-            )
-            if not os.path.isdir(epednn_path):
-                raise FileNotFoundError(
-                    f"EPEDNN.jl not found at {epednn_path}. "
-                    "Initialize it with: git submodule update --init dependencies/EPEDNN.jl"
-                )
-            juliapkg.add(
-                "EPEDNN",
-                uuid="e64856f0-3bb8-4376-b4b7-c03396503991",
-                path=epednn_path,
-                dev=True,
-            )
-
-            # 2. Resolve and instantiate. THIS is what fixes your missing dependency error!
-            juliapkg.resolve()
-
-            # 3. Now that the environment is set up, load juliacall and your package
-            from juliacall import Main as jl
-            jl.seval('using EPEDNN')
-
-            # from juliacall import Main as jl
-
-            # 1. Load the Julia EPEDNN module (Assuming EPEDNN is already installed in your Julia environment)
-            '''
-                # To install EPEDNN, run the following command in your terminal:
-                conda activate sc_ped
-                cd /Users/nelsonlab/codes/saarelma-conner-ped
-                julia
-
-                # if you need to install julia, run the following command in your terminal:
-                curl -fsSL https://install.julialang.org | sh
-                # then restart terminal
-                julia --version
-                # if this doesn't work, you could try the following although I did not verify this works:
-                echo 'export PATH="$HOME/.juliaup/bin:$PATH"' >> ~/.zshrc
-                source ~/.zshrc
-                julia --version
-
-                # Then in Julia:
-                using Pkg
-                Pkg.activate(".")  # optional but recommended: use this repo as the active Julia project
-                Pkg.develop(path="dependencies/EPEDNN.jl")
-                Pkg.instantiate()
-
-                #Then in Julia: 
-                using EPEDNN
-
-
-                Make sure that EPEDNN submodule is installed, the General Julia package registry is installed, and juliacall and juliapkg are installed.
-                The following commands may help:
-
-                pip install juliapkg
-                git submodule update --init dependencies/EPEDNN.jl
-                # Only needed if juliapkg fails on registry download:
-                git clone --depth 1 https://github.com/JuliaRegistries/General.git \
-                ~/.julia/registries/General
-                pip install juliacall
-            '''
-            # you can run Julia commands in Python using jl.seval('command')
-            # jl.seval('using Pkg')
-            # jl.seval('Pkg.activate(".")  # optional but recommended: use this repo as the active Julia project')
-            # jl.seval('Pkg.develop(path="/Users/nelsonlab/codes/saarelma-conner-ped/dependencies/EPEDNN.jl")')
-            # jl.seval('Pkg.instantiate()')
-            # jl.seval('using EPEDNN')
-
-            # 2. Load the pre-trained EPED neural network model
-            # This mimics the EPEDNN.loadmodelonce("EPED1NNmodel.bson") step
-            model_filename = "EPED1NNmodel.bson" 
-            self.epednn_model = jl.EPEDNN.loadmodelonce(model_filename)
-        elif model in ('EPED_SPARC', 'EPED_SCOPING'):
-            # Vendored package lives at dependencies/epednn_mit/src/epednn_mit/;
-            # it is not installed into the env by default, so put src/ on sys.path.
-            import sys
-            import importlib
-            from pathlib import Path
-            epednn_root = Path(__file__).resolve().parents[2] / "dependencies" / "epednn_mit" # ESCAPE root (src/epednn/..)
-            epednn_src = epednn_root / "src"
-            if not epednn_src.is_dir():
-                raise FileNotFoundError(
-                    f"epednn_mit not found at {epednn_src}. "
-                    "Expected dependencies/epednn_mit/src in the repo."
-                )
-            if str(epednn_src) not in sys.path:
-                sys.path.insert(0, str(epednn_src))
-            # The two model families share a layout, so select the subpackage by name.
-            subpkg = {'EPED_SPARC': 'sparc', 'EPED_SCOPING': 'scoping'}[model]
-            weights_dir = epednn_src / "epednn_mit" / "models" / subpkg
-            if not weights_dir.is_dir():
-                raise FileNotFoundError(
-                    f"epednn_mit model '{subpkg}' not found at {weights_dir}. "
-                    "The scoping model lives on the 'scoping_model' branch of the submodule: "
-                    "git -C dependencies/epednn_mit checkout scoping_model"
-                )
-            module = importlib.import_module(f"epednn_mit.models.{subpkg}.tensorflow_model")
-            generate = getattr(module, f"generate_epednn_mit_{subpkg}_tensorflow")
-            from epednn_mit.utils.load import load_weights
-            weights = load_weights(sorted(weights_dir.glob(f"*{subpkg}*.pkl")))
-            if not weights:
-                raise FileNotFoundError(f"No *{subpkg}*.pkl weights found in {weights_dir}")
-            self.epednn_model = generate(weights)
+        if epednn_model is not None:
+            self.epednn_model = epednn_model
+        else:
+            self.epednn_model = load_epednn_model(model)
 
         self.bt = np.array(self.calc_B(self.eq['raxis'],self.eq['zaxis'])[1][2])
 

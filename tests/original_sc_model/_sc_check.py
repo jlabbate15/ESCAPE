@@ -36,7 +36,7 @@ from scipy.interpolate import PchipInterpolator
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.solver_sc import saarelma_connor_sc
+from escape.solver_sc import saarelma_connor_sc
 
 MHD_FP = Path("/mnt/homes_global/jal2351/software/sc_inputs/CAKEgeqdsks/g158091.01935")
 KPROF_FP = Path("/mnt/homes_global/jal2351/software/sc_inputs/CAKEpfiles/p158091.01935")
