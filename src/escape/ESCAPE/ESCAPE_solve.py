@@ -1,5 +1,4 @@
 # Loop between EPEDNN and coupled version of Saarelma-Connor model to find self-consistent pedestal
-import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,10 +6,8 @@ import shutil
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.interpolate import interp1d
 
-ROOT = Path(__file__).resolve().parents[3]  # ESCAPE root (src/escape/ESCAPE/..)
-sys.path.insert(0, str(ROOT))
 from escape.ESCAPE.ESCAPE_api import ESCAPE
-from helpers.ped_width_proxy import ped_width
+from escape.helpers.ped_width_proxy import ped_width
 
 
 def ESCAPE_solve(
