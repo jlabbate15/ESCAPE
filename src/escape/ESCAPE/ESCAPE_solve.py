@@ -31,6 +31,7 @@ def ESCAPE_solve(
     ESCAPE_tol_max = 1e-5,
     out_dir = None, # directory to output files
     verbose = False,
+    epednn_model = None, # already loaded EPEDNN model (see load_epednn_model); None loads it here
 ):
     """Solve the self-consistent pedestal problem using the EPEDNN model and the Saarelma-Connor model.
 
@@ -53,6 +54,11 @@ def ESCAPE_solve(
         sc_params['x_pwg'].
     out_dir : str
         Path to directory to save successful solutions from the Saarelma-Connor model.
+    epednn_model : object or None
+        An already loaded EPEDNN model, for example from
+        escape.epednn.epednn_call.load_epednn_model. It must be of the model
+        named in epednn_params['epednn_model'], because feed_epednn selects
+        how to call it by that name. None loads the model in setup_epednn.
     """
 
     state = ESCAPE(
@@ -72,7 +78,7 @@ def ESCAPE_solve(
     )
     print("Initial state built.")
 
-    state.setup_epednn(model=epednn_params['epednn_model'])
+    state.setup_epednn(model=epednn_params['epednn_model'], epednn_model=epednn_model)
     print("One-time EPEDNN setup was successful.")
 
     # Clear outputs from any previous scan (including appended failure logs) and setup logging files
