@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 # ne_grad_bc_locs=('inner' 'outer')
 sc_models=('1D')
 sc_implementations=('scipy')
-ne_grad_bc_locs=('outer')
+ne_grad_bc_locs=('inner')
 run_suffix='10272026_samulidamp_complete'
 picard_relax="${PICARD_RELAX:-1:1.0;11:0.5;31:0.2}"
 eq6_form="${EQ6_FORM:-complete}"

@@ -16,8 +16,9 @@ from helpers.parse_prof import kprof_load
 
 # ---------------------- COMMON USER INPUTS ----------------------
 alpha_crits = np.array([0.01])
-nFC_x0s = np.array([1e15])
-C_KBMs = np.array([0.3])
+# nFC_x0s = np.array([1e15])
+nFC_x0s = np.logspace(14.5,19,8)
+C_KBMs = np.array([0.0])
 De_chie_etgs = np.array([0.1])
 ncx_x0_ratios = np.array([15])
 
@@ -26,12 +27,26 @@ mhd_fp = 'geqdsk-ARCv3a'
 ne_fp = 'ARC_ne.csv'
 Te_fp = 'ARC_Te.csv'
 
-# Overridable from the environment (see submit_scan.sh)
+# Overridable from the environment (see submit_scan_ARC.sh)
 sc_model = os.environ.get('SC_MODEL', '3D')
 sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'firedrake')
 ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'inner')
+picard_relax = os.environ.get('PICARD_RELAX', '1.0') # float, or a schedule 'it:relax;it:relax;...' (no commas: sbatch --export splits on them)
+picard_relax = ([(int(s), float(r)) for s, r in (e.split(':') for e in picard_relax.split(';'))]
+                if ':' in picard_relax else float(picard_relax))
+picard_rel_tol = float(os.environ.get('PICARD_REL_TOL', 1e-6)) # SC Picard loop: converged when |dne|_rel < this
+run_suffix = os.environ.get('RUN_SUFFIX', '')
+eq6_form = os.environ.get('EQ6_FORM', 'complete') # 'complete' or 'paper'
+eq7_form = os.environ.get('EQ7_FORM', 'complete') # 'complete' or 'paper' (1D scipy only)
+impurity_dilution = os.environ.get('IMPURITY_DILUTION', 'none') # 'none' or 'carbon' (1D scipy only; KBM alpha)
+impurity_dilution = None if impurity_dilution.lower() == 'none' else impurity_dilution
+D_TG_treatment = os.environ.get('D_TG_TREATMENT', 'implicit') # 'implicit' or 'picard' (1D scipy only)
+picard_gate_mode = os.environ.get('PICARD_GATE_MODE', 'steep_grad') # 'average' or 'steep_grad' (KBM alpha gate)
+bvp_tol = float(os.environ.get('BVP_TOL', 1e-6)) # solve_bvp tolerance ('inner', scipy only)
+bvp_max_nodes = int(os.environ.get('BVP_MAX_NODES', 5000)) # solve_bvp max mesh nodes ('inner', scipy only)
 
-output_dir = f'outputs/ARC_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}'
+output_dir = (f'outputs/ARC_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}'
+              + (f'_{run_suffix}' if run_suffix else ''))
 # ----------------------------------------------------------------
 
 
@@ -153,16 +168,17 @@ sc_params = {
 sc_params.update({
     'x_res':40,
     'ne_grad_bc_loc':ne_grad_bc_loc,
+    'picard_gate_mode':picard_gate_mode,
     'picard_max_it':50,
-    'picard_rtol':1e-6,
-    'picard_relax':1.0,
+    'picard_rtol':picard_rel_tol,
+    'picard_relax':picard_relax,
     'reuse_setup':False,
 })
 
 # SC scipy specific
 sc_params.update({
-    'bvp_tol':1e-6,
-    'bvp_max_nodes':5000,
+    'bvp_tol':bvp_tol, # solve_bvp ('inner')
+    'bvp_max_nodes':bvp_max_nodes,
 })
 
 # SC firedrake specific
@@ -186,8 +202,11 @@ sc_params.update({
 
 # SC 1D specific
 sc_params.update({
-    'eq6_form':"complete",
+    'eq6_form':eq6_form,
+    'eq7_form':eq7_form, # scipy only
+    'impurity_dilution':impurity_dilution, # scipy only
     'first_step':"auto",
+    'D_TG_treatment':D_TG_treatment, # scipy only
 })
 
 # EPEDNN parameters
@@ -225,45 +244,49 @@ for ne_x0 in ne_x0s:
         }
         sc_params['free_params'] = free_params
 
-        # try:
-        t0 = time.perf_counter()
-        state = ESCAPE_solve(
-            sc_params,
-            epednn_params,
-            Z_i = Z_i, # Z of ions
-            Z_eff = Z_eff, 
-            P_tot_e = P_tot_e, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
-            ne_x0 = ne_x0, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
-            equil_params = equil_params, # dictionary of required equilibrium parameters
-            kprof_params = kprof_params, # dictionary of required kinetic profile (density, temperature) parameters
-            quasineutral_flag = quasineutral_flag,
-            T_rat_flag = T_rat_flag, # True if using a temperature ratio between ions and electrons, False if doing something else
-            T_rat = T_rat,
-            pol_norm = pol_norm, # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
-            species = species, # species of ions, currently supporting: D, D-T
-            regime_flag = regime_flag, # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
-            ESCAPE_iter_max = ESCAPE_iter_max, 
-            ESCAPE_tol_max = ESCAPE_tol_max,
-            out_dir = out_dir, # directory to output files
-            verbose = verbose_ESCAPE,
-        )
-        t1 = time.perf_counter()
+        # ESCAPE_solve clears its out_dir on every call, so each scan point gets its own
+        run_dir = f'{out_dir}/run_{i}'
 
-        # Save model output
-        out_dict = {
-            'mhd_fp': mhd_fp,
-            'profiles': kprof_params, # experimental profiles
-            'free_params': free_params,
-            'Zeff': Z_eff,
-            'P_tot_e': P_tot_e,
-            'i': i,
-            'state': state_to_dict(state), # picklable ESCAPE state attributes
-            'ESCAPE_runtime': t1-t0,
-        }
-        np.save(out_dir + '/out_dict.npy', out_dict)
-        # except Exception as e:
-            # out_dict = {'failed': True, 'free_params': free_params, 'error': str(e)}
-            # np.save(out_dir + '/failed.npy', out_dict)
+        try:
+            t0 = time.perf_counter()
+            state = ESCAPE_solve(
+                sc_params,
+                epednn_params,
+                Z_i = Z_i, # Z of ions
+                Z_eff = Z_eff, 
+                P_tot_e = P_tot_e, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
+                ne_x0 = ne_x0, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
+                equil_params = equil_params, # dictionary of required equilibrium parameters
+                kprof_params = kprof_params, # dictionary of required kinetic profile (density, temperature) parameters
+                quasineutral_flag = quasineutral_flag,
+                T_rat_flag = T_rat_flag, # True if using a temperature ratio between ions and electrons, False if doing something else
+                T_rat = T_rat,
+                pol_norm = pol_norm, # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
+                species = species, # species of ions, currently supporting: D, D-T
+                regime_flag = regime_flag, # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
+                ESCAPE_iter_max = ESCAPE_iter_max, 
+                ESCAPE_tol_max = ESCAPE_tol_max,
+                out_dir = run_dir, # directory to output files
+                verbose = verbose_ESCAPE,
+            )
+            t1 = time.perf_counter()
+
+            # Save model output
+            out_dict = {
+                'mhd_fp': mhd_fp,
+                'profiles': kprof_params, # experimental profiles
+                'free_params': free_params,
+                'Zeff': Z_eff,
+                'P_tot_e': P_tot_e,
+                'i': i,
+                'state': state_to_dict(state), # picklable ESCAPE state attributes
+                'ESCAPE_runtime': t1-t0,
+            }
+            np.save(run_dir + '/out_dict.npy', out_dict)
+        except Exception as e:
+            out_dict = {'failed': True, 'free_params': free_params, 'error': str(e)}
+            Path(run_dir).mkdir(parents=True, exist_ok=True) # in case ESCAPE_solve raised before creating it
+            np.save(run_dir + '/failed.npy', out_dict)
 
         if i%50 == 0:
             print(f'Scan {i+1} of {scan_total} completed')
