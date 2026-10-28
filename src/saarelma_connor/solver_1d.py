@@ -5,7 +5,7 @@ Full documentation: docs/solver_1d_documentation.tex.
 """
 
 import numpy as np
-from scipy.interpolate import PchipInterpolator, interp1d
+from scipy.interpolate import CubicHermiteSpline, PchipInterpolator, interp1d
 from scipy.integrate import cumulative_trapezoid, solve_bvp
 
 try:
@@ -196,7 +196,7 @@ class OneDSolverMixin:
             "history":     history,
         }
 
-    def calc_D_KBM_average_sc(self, n_e_ped, x_ped, gate_mode="average"):
+    def calc_D_KBM_average_sc(self, n_e_ped, x_ped, impurity_dilution=None, gate_mode="average"):
         """KBM diffusivity on x_init from the pedestal-averaged Connor-Hastie
         alpha of ``n_e_ped`` on ``x_ped``, gated as a whole (Saarelma Eqs.
         24-25). ``gate_mode`` 'average' averages alpha over all of ``x_ped``;
@@ -219,7 +219,16 @@ class OneDSolverMixin:
         alpha_nodp = np.interp(x_ped, self.x_init, self._alpha_nodp_xinit)
 
         # Pa; neutral pressures neglected, quasi-neutral plasma assumed.
-        _pres = n_e_ped * (T_e + T_i) * _EV2J
+        if impurity_dilution=="carbon":
+            fd = (6+1-self.Z_eff)/(6*1) # main ion charge = 1, carbon charge = 6
+            _pres = n_e_ped * (T_e + fd*T_i) * _EV2J
+        elif impurity_dilution is None:
+            _pres = n_e_ped * (T_e + T_i) * _EV2J
+        else:
+            raise ValueError(
+                f"impurity_dilution must be None or 'carbon', got "
+                f"{impurity_dilution!r}."
+            )
         dpdx = np.gradient(_pres, x_ped)                     # Pa/m
         _alpha = alpha_nodp * dpdx                           # dimensionless
 
@@ -359,6 +368,30 @@ class OneDSolverMixin:
         return eq6_form
 
     @staticmethod
+    def _check_eq7_form_sc(eq7_form):
+        """Validate and normalise the ``eq7_form`` switch."""
+        eq7_form = str(eq7_form).lower()
+        if eq7_form not in ("complete", "paper"):
+            raise ValueError(
+                "eq7_form must be 'complete' (corrected Saarelma Eq. 15) "
+                "or 'paper' (Saarelma Eq. 15 exactly as printed), got "
+                f"{eq7_form!r}."
+            )
+        if eq7_form == "paper":
+            import warnings
+            warnings.warn(
+                "eq7_form='paper' is Saarelma Eq. 15 exactly as printed: "
+                "-D_ped (n_e' - n_e'_in) in the bracket, i.e. D_ped instead "
+                "of <|grad r|^2> D_ped / (|V_CX| f_CX).  It leaves "
+                "1/<|grad r|^2> on the n_e (n_e' - n_e'_in) term and is "
+                "dimensionally inconsistent (that coefficient is evaluated "
+                "in SI, implicitly divided by 1 m/s), so expect it to be "
+                "far stiffer than the complete form.",
+                RuntimeWarning, stacklevel=3
+            )
+        return eq7_form
+
+    @staticmethod
     def _check_first_step_sc(first_step):
         """Validate and normalise the ``first_step`` switch."""
         first_step = str(first_step).lower()
@@ -368,6 +401,51 @@ class OneDSolverMixin:
                 f"{first_step!r}."
             )
         return first_step
+
+    @staticmethod
+    def _check_picard_relax_sc(picard_relax):
+        """Validate ``picard_relax`` and return ``(relax_at, spec)``.
+
+        ``picard_relax`` is either a float in (0, 1] used for every Picard
+        iteration, or a schedule ``[(it_start, relax), ...]``: ``relax``
+        applies from Picard iteration ``it_start`` (1-based) until the next
+        entry's ``it_start``.  The first entry must start at iteration 1.
+        E.g. ``[(1, 1.0), (11, 0.5), (31, 0.2)]`` is undamped for 10
+        iterations, then relax = 0.5 to iteration 30, then 0.2 (damping
+        1 - relax = 0, 0.5, 0.8).  ``relax_at(it)`` gives the value for
+        iteration ``it``; ``spec`` is a JSON-friendly copy for kbm_info.
+        """
+        if np.isscalar(picard_relax):
+            schedule = [(1, float(picard_relax))]
+        else:
+            try:
+                schedule = sorted((int(s), float(r)) for s, r in picard_relax)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "picard_relax must be a float in (0, 1] or a list of "
+                    f"(it_start, relax) pairs, got {picard_relax!r}."
+                ) from None
+            if not schedule or schedule[0][0] != 1:
+                raise ValueError(
+                    "a picard_relax schedule must start at iteration 1, got "
+                    f"{picard_relax!r}."
+                )
+            if len({s for s, _ in schedule}) != len(schedule):
+                raise ValueError(
+                    "picard_relax schedule has duplicate start iterations: "
+                    f"{picard_relax!r}."
+                )
+        for _, r in schedule:
+            if not (0.0 < r <= 1.0):
+                raise ValueError(f"picard_relax must be in (0, 1], got {r}.")
+        starts = np.array([s for s, _ in schedule])
+        values = [r for _, r in schedule]
+
+        def relax_at(it):
+            return values[np.searchsorted(starts, it, side="right") - 1]
+
+        spec = values[0] if len(schedule) == 1 else [list(e) for e in schedule]
+        return relax_at, spec
 
     def _first_step_failed_sc(self, tag, first_step, err):
         """Handle a failed Eq. (6) first step: re-raise if
@@ -395,23 +473,28 @@ class OneDSolverMixin:
 
     def _record_picard_sc(self, tag, converged, n_it, history,
                           picard_max_it, picard_relax, picard_rtol,
-                          picard_gate_mode="average"):
+                          picard_gate_mode="average",
+                          D_TG_treatment="implicit"):
         """Store ``picard_info`` / ``kbm_info`` and raise if diverged."""
         self.picard_info = {
             "converged": converged,
             "iterations": n_it,
             "gate_mode": picard_gate_mode,
+            "D_TG_treatment": D_TG_treatment,
             "history": history,
         }
         self.kbm_info = {
             "treatment": "picard",
             "picard_gate_mode": picard_gate_mode,
+            "D_TG_treatment": D_TG_treatment,
             "eq6_form": getattr(self, "eq6_form", None),
+            "eq7_form": getattr(self, "eq7_form", None),
             "first_step": getattr(self, "first_step_used", None),
             "alpha_crit": float(self.alpha_crit),
             "picard_max_it": int(picard_max_it),
             "picard_rtol": float(picard_rtol),
-            "picard_relax": float(picard_relax),
+            "picard_relax": (float(picard_relax) if np.isscalar(picard_relax)
+                             else picard_relax),
             "picard_converged": converged,
             "picard_iterations": n_it,
         }
@@ -457,11 +540,14 @@ class OneDSolverMixin:
                        tanh_center=None,
                        x_pwg=None,
                        eq6_form="complete",
+                       eq7_form="complete",
                        first_step="auto",
+                       impurity_dilution=None,
                        picard_max_it=50,
                        picard_rtol=1e-6,
                        picard_relax=1.0,
                        picard_gate_mode="average",
+                       D_TG_treatment="implicit",
                        bvp_tol=1e-6,
                        bvp_max_nodes=5000,
                        ivp_method="Radau",
@@ -471,7 +557,15 @@ class OneDSolverMixin:
                        verbose=None):
         """Implicit scipy solver: an Eq. (6) first step, then Picard
         iteration of Eq. (7) with E(x) and D_KBM frozen from the previous
-        iterate. ``ne_grad_bc_loc="inner"`` is a BVP solved with
+        iterate. ``eq7_form="paper"`` solves Saarelma Eq. 15 exactly as
+        printed (dimensionally inconsistent; see _check_eq7_form_sc).
+        ``D_TG_treatment="picard"`` also freezes D_TG = C_ETG/n_e
+        from the previous iterate, so all of D_ped is fixed per iteration and
+        only the explicit n_e factors of Eq. (7) are solved self-consistently
+        (the default "implicit" keeps C_ETG/n_e inside the BVP/IVP).
+        ``picard_relax`` is a float or a per-iteration schedule
+        ``[(it_start, relax), ...]`` (see _check_picard_relax_sc).
+        ``ne_grad_bc_loc="inner"`` is a BVP solved with
         ``solve_bvp`` (``bvp_tol``, ``bvp_max_nodes``); ``"outer"`` puts
         both conditions at the separatrix, so it is an IVP integrated inward
         with ``solve_ivp`` (``ivp_method``, ``ivp_rtol``, ``ivp_atol``).
@@ -480,13 +574,18 @@ class OneDSolverMixin:
         """
         v = self.verbose if verbose is None else bool(verbose)
         picard_gate_mode = str(picard_gate_mode).lower()
-        picard_relax = float(picard_relax)
-        if not (0.0 < picard_relax <= 1.0):
+        relax_at, picard_relax = self._check_picard_relax_sc(picard_relax)
+        D_TG_treatment = str(D_TG_treatment).lower()
+        if D_TG_treatment not in ("implicit", "picard"):
             raise ValueError(
-                f"picard_relax must be in (0, 1], got {picard_relax}."
+                "D_TG_treatment must be 'implicit' or 'picard', got "
+                f"{D_TG_treatment!r}."
             )
+        self.D_TG_treatment = D_TG_treatment
         eq6_form = self._check_eq6_form_sc(eq6_form)
         self.eq6_form = eq6_form
+        eq7_form = self._check_eq7_form_sc(eq7_form)
+        self.eq7_form = eq7_form
         first_step = self._check_first_step_sc(first_step)
         self.first_step_used = first_step
         ne_grad_bc_loc = bcig.check_ne_bc_loc(ne_grad_bc_loc)
@@ -540,6 +639,7 @@ class OneDSolverMixin:
         # dne_method="Saarelma2023" also takes D_SOL from it; both are
         # refreshed from the previous iterate on every Picard iteration.
         self.calc_D_KBM_average_sc(ne_init, x_grid,
+                                   impurity_dilution=impurity_dilution,
                                    gate_mode=picard_gate_mode)
         D_KBM_frozen = self._D_KBM.copy()
         bcig.resolve_saarelma2023_neumann(self, nebcs, self.x_init,
@@ -566,11 +666,36 @@ class OneDSolverMixin:
             return (f0_spl, f1_spl, f0_spl.derivative(),
                     f1_spl.derivative())
 
-        def _conductance(xi, N, f0_x, f1_x, df0_x, df1_x):
+        def _frozen_tg(N_g, dN_g, f1_x, df1_x):
+            """<|grad r|^2> D_TG = f1/(n0 N) and its x-derivative on x_grid,
+            from an iterate (N, dN/dxi) given on x_grid.
+            """
+            N_g = np.maximum(N_g, 1e-8)
+            f1 = f1_x(x_grid)
+            h = f1 / (n0 * N_g)
+            dh = (df1_x(x_grid) / (n0 * N_g)
+                  - f1 * dN_g / (L * n0 * N_g ** 2))
+            return h, dh
+
+        def _tg_interp(h, dh):
+            """(h_x, dh_x) for _conductance: a C^1 cubic Hermite interpolant
+            of the nodal values and x-derivatives of h on x_grid.
+            """
+            h_spl = CubicHermiteSpline(x_grid, h, dh)
+            return h_spl, h_spl.derivative()
+
+        def _conductance(xi, N, f0_x, f1_x, df0_x, df1_x, tg=None):
             """Return x, f, C_K and C_N at (xi, N), flooring N where it appears
-            in a denominator.
+            in a denominator.  With ``tg = (h_x, dh_x)`` the ETG part
+            h = <|grad r|^2> D_TG is frozen (D_TG_treatment="picard"), so f
+            does not depend on N and C_N = 0.
             """
             x = L * xi
+            if tg is not None:
+                h_x, dh_x = tg
+                F = f0_x(x) + h_x(x)
+                C_K = (L / F) * (df0_x(x) + dh_x(x))
+                return x, F, C_K, 0.0
             N_safe = np.maximum(N, 1e-8)
             f1 = f1_x(x)
             F = f0_x(x) + f1 / (n0 * N_safe)  # = <|grad r|^2> D_ped, m^2/s
@@ -604,17 +729,30 @@ class OneDSolverMixin:
         # --------------------------------------------------------------
         f0_x, f1_x, df0_x, df1_x = _build_f_interp(D_KBM_frozen)
 
+        dne_guess = np.gradient(ne_init, x_grid)
+        Y_guess = np.vstack([ne_init / n0, dne_guess * (L / n0)])
+
+        # D_TG_treatment="picard": D_TG = C_ETG/n_e frozen from the initial
+        # guess for the first step, then refreshed like D_KBM.
+        tg = None
+        h_frozen = dh_frozen = None
+        if D_TG_treatment == "picard":
+            h_frozen, dh_frozen = _frozen_tg(Y_guess[0], Y_guess[1],
+                                             f1_x, df1_x)
+            tg = _tg_interp(h_frozen, dh_frozen)
+
         def ode_first(xi, Y):
             N, dN = Y
             x, _F, C_K, C_N = _conductance(
-                xi, N, f0_x, f1_x, df0_x, df1_x,
+                xi, N, f0_x, f1_x, df0_x, df1_x, tg,
             )
             Si = Si_x(x)
             Scx = Scx_x(x)
             if eq6_form == "paper":
                 # Eq. 6 as printed: the RHS D_ped cancels the <|grad r|^2>
                 # D_ped of the transport operator, leaving 1/<|grad r|^2>.
-                C_A6 = n0 * L * (Si + Scx) / (g_x(x) * Vfc * fFC_x(x))
+                # Exactly as printed: (S_i + S_CX)/[V_FC], no f_FC.
+                C_A6 = n0 * L * (Si + Scx) / (g_x(x) * Vfc)
             else:
                 # Eq. (16-full): <|grad r|^2> D_ped kept on both sides
                 # (cancels exactly), shape factor 1 + S_CX/(2 S_i) kept.
@@ -623,8 +761,6 @@ class OneDSolverMixin:
             d2N = C_A6 * N * (dN - dN_in) - C_K * dN + C_N * dN ** 2
             return np.vstack([dN, d2N])
 
-        dne_guess = np.gradient(ne_init, x_grid)
-        Y_guess = np.vstack([ne_init / n0, dne_guess * (L / n0)])
         sol = None
         if first_step != "skip":
             sol = _solve(ode_first, Y_guess)
@@ -674,6 +810,7 @@ class OneDSolverMixin:
 
         for it in range(1, int(picard_max_it) + 1):
             n_picard = it
+            relax = relax_at(it)
 
             # Previous iterate in SI on its (possibly adapted) grid.
             ne_prev = n0 * N_prev
@@ -687,19 +824,35 @@ class OneDSolverMixin:
             if E_frozen is None:
                 E_frozen = E_new
             else:
-                E_frozen = (picard_relax * E_new
-                            + (1.0 - picard_relax) * E_frozen)
+                E_frozen = (relax * E_new
+                            + (1.0 - relax) * E_frozen)
             E_x = interp1d(x_grid, E_frozen, kind='linear',
                            bounds_error=False, fill_value='extrapolate')
 
             ne_prev_on_grid = np.interp(x_grid, x_prev, ne_prev)
-            D_KBM_new = self.calc_D_KBM_average_sc(ne_prev_on_grid, x_grid,
-                                                   gate_mode=picard_gate_mode)
+            D_KBM_new = self.calc_D_KBM_average_sc(
+                ne_prev_on_grid, x_grid,
+                impurity_dilution=impurity_dilution,
+                gate_mode=picard_gate_mode,
+            )
             gate_now = bool(self.kbm_gate_on)
-            D_KBM_frozen = (picard_relax * D_KBM_new
-                            + (1.0 - picard_relax) * D_KBM_frozen)
+            D_KBM_frozen = (relax * D_KBM_new
+                            + (1.0 - relax) * D_KBM_frozen)
             self._D_KBM = D_KBM_frozen
             f0_x, f1_x, df0_x, df1_x = _build_f_interp(D_KBM_frozen)
+
+            # Previous iterate on the uniform grid: the warm start for
+            # solve_bvp (the IVP needs no guess) and, for
+            # D_TG_treatment="picard", the n_e that D_TG is frozen from.
+            N_guess = np.interp(x_grid, x_prev, N_prev)
+            dN_guess = np.interp(x_grid, x_prev, dN_prev)
+            if D_TG_treatment == "picard":
+                h_new, dh_new = _frozen_tg(N_guess, dN_guess, f1_x, df1_x)
+                h_frozen = (relax * h_new
+                            + (1.0 - relax) * h_frozen)
+                dh_frozen = (relax * dh_new
+                             + (1.0 - relax) * dh_frozen)
+                tg = _tg_interp(h_frozen, dh_frozen)
 
             # dne_method="Saarelma2023": D_SOL = D_ped(0) depends on D_KBM,
             # so refresh the separatrix Neumann value with it (bc / _solve
@@ -712,7 +865,7 @@ class OneDSolverMixin:
             def ode_full(xi, Y):
                 N, dN = Y
                 x, F, C_K, C_N = _conductance(
-                    xi, N, f0_x, f1_x, df0_x, df1_x,
+                    xi, N, f0_x, f1_x, df0_x, df1_x, tg,
                 )
                 Si = Si_x(x)
                 Scx = Scx_x(x)
@@ -721,16 +874,21 @@ class OneDSolverMixin:
                 C_cx = 1.0 - (Vfc * fFC_x(x) / (Vcx * fCX)) * (
                     (Si + 0.5 * Scx) / (Si + Scx)
                 )
-                C_A = n0 * L * Si / (Vcx * fCX)
+                if eq7_form == "paper":
+                    # Saarelma Eq. 15 exactly as printed: -D_ped (n_e' -
+                    # n_e'_in) inside the bracket, so the D_ped cancels the
+                    # <|grad r|^2> D_ped of the transport operator, leaving
+                    # 1/<|grad r|^2>, and there is no 1/(|V_CX| f_CX).  This
+                    # is dimensionally inconsistent (C_A carries m/s): it is
+                    # evaluated in SI, i.e. implicitly divided by 1 m/s.
+                    C_A = n0 * L * Si / g_x(x)
+                else:
+                    C_A = n0 * L * Si / (Vcx * fCX)
                 C_E = (L ** 2) * Si * C_cx * self.nFC_x0 * E_x(x) / F
                 d2N = (C_A * N * (dN - dN_in) - C_E * N
                        - C_K * dN + C_N * dN ** 2)
                 return np.vstack([dN, d2N])
 
-            # Warm start from the previous iterate on the uniform grid
-            # (used by solve_bvp only; the IVP needs no guess).
-            N_guess = np.interp(x_grid, x_prev, N_prev)
-            dN_guess = np.interp(x_grid, x_prev, dN_prev)
             sol = _solve(ode_full, np.vstack([N_guess, dN_guess]))
             if not sol.success:
                 raise RuntimeError(
@@ -742,8 +900,7 @@ class OneDSolverMixin:
             N_prev, dN_prev = sol.y[0], sol.y[1]
 
             ne_new_on_grid = n0 * np.interp(x_grid, x_prev, N_prev)
-            dn_rel = (np.max(np.abs(ne_new_on_grid - ne_prev_on_grid))
-                      / max(np.max(np.abs(ne_new_on_grid)), 1e-300))
+            dn_rel = np.max( abs(ne_new_on_grid - ne_prev_on_grid) / np.maximum(ne_new_on_grid, 1e-8) )
 
             picard_history.append({
                 "iteration": it,
@@ -751,18 +908,26 @@ class OneDSolverMixin:
                 "alpha_frac_above": float(self.alpha_frac_above),
                 "kbm_gate_on": gate_now,
                 "dne_rel": float(dn_rel),
+                "picard_relax": float(relax),
                 "D_sol": nebcs.D_sol,
                 "dne_dx_bc": float(nebcs.dne_dx),
+                # TEMP DEBUG: n_e that alpha_bar was computed from (input
+                # to this iteration), and this iteration's output, on x_grid
+                "x": x_grid.copy(),
+                "ne_in": ne_prev_on_grid.copy(),
+                "ne_out": ne_new_on_grid.copy(),
             })
             if v:
                 d_sol_str = ("" if nebcs.D_sol is None
                              else f", D_SOL = {nebcs.D_sol:.4e}")
                 print(
                     f"[sc scipy] picard it {it:3d}: |dne|_rel = {dn_rel:.3e}, "
+                    f"relax = {relax:.2f}, "
                     f"alpha_bar = {self.alpha_bar_ped:.4f}, "
                     f"KBM {'ON' if gate_now else 'OFF'}{d_sol_str}"
                 )
-            if dn_rel < float(picard_rtol) and gate_now == prev_gate:
+            # if dn_rel < float(picard_rtol) and gate_now == prev_gate:
+            if dn_rel < float(picard_rtol):
                 picard_converged = True
                 break
             prev_gate = gate_now
@@ -770,7 +935,8 @@ class OneDSolverMixin:
         self._record_picard_sc("sc scipy", picard_converged, n_picard,
                                picard_history, picard_max_it, picard_relax,
                                picard_rtol,
-                               picard_gate_mode)
+                               picard_gate_mode,
+                               D_TG_treatment=D_TG_treatment)
 
         # De-normalise and store.
         self.hat_x_sol = sol.x.copy()
@@ -780,6 +946,10 @@ class OneDSolverMixin:
         self.dne_dx_sol = (n0 / L) * sol.y[1]
         self.E_sol = np.interp(self.x_sol, x_grid, E_frozen)
         self.sol = sol
+        # D_TG used in the last solve (frozen from the previous iterate), on
+        # x_grid; None for D_TG_treatment="implicit".
+        self.D_TG_frozen = (None if h_frozen is None
+                            else h_frozen / g_x(x_grid))
 
         if v:
             print(f"[sc scipy] solved.  n_e in "
@@ -908,6 +1078,7 @@ class OneDSolverMixin:
             )
         eq6_form = self._check_eq6_form_sc(eq6_form)
         self.eq6_form = eq6_form
+        self.eq7_form = "complete"  # only the scipy solver offers 'paper'
         first_step = self._check_first_step_sc(first_step)
         self.first_step_used = first_step
         ne_grad_bc_loc = bcig.check_ne_bc_loc(ne_grad_bc_loc)

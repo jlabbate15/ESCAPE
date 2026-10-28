@@ -92,6 +92,7 @@ class SaarelmaConnorBase:
         self.c_s = (self.e_i * self.T_e * 1e3 / (self.M_i * self.M_eff)) ** 0.5 # m/s, cs = (e*T_e/mD)^1/2, T_e in keV -> eV via 1e3, as defined in W. Guttenfelder et al 2021 Nucl. Fusion 61 056005
         V_th_i_rz = self.psi_rz_expand(self.V_th_i, psi_N_A='T_i')
         self.rho_s = V_th_i_rz*self.M_i*self.M_eff / (self.e_i * self.B) # m, known on each RZ grid point
+        self.rho_s = self.rho_s * (1/np.sqrt(2)) * (1/np.sqrt(self.Z_i)) # remove velocity prefactor to match Saarelma et al. 2023 implementation
         self.rho_s = self.fsa(self.rho_s,flux_surfaces='T_e') # m, known on each flux surface, outputs nan for psi_N < 0.01 or psi_N > 0.99
         valid = ~np.isnan(self.rho_s)
         self.rho_s = interp1d(self.psi_Te_eval[valid], self.rho_s[valid], kind='linear',bounds_error=False, fill_value='extrapolate')(self.psi_Te_eval) # removes nan values from rho_s

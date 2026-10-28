@@ -71,7 +71,7 @@ the \code{free_params} argument of either entry point.
 Two forms are available, selected by \code{eq6_form}:
 \begin{align}
 \frac{d}{dx}\!\left[\gradr \Dped \frac{dn_e}{dx}\right]
- &= \frac{n_e \Dped (S_i+\SCX)}{\VFC \fFC}
+ &= \frac{n_e \Dped (S_i+\SCX)}{\VFC}
     \left(\frac{dn_e}{dx} - \left.\frac{dn_e}{dx}\right|_{\mathrm{in}}\right)
  && (\code{eq6_form="paper"}), \label{eq:eq6paper}\\
 \frac{d}{dx}\!\left[\gradr \Dped \frac{dn_e}{dx}\right]
@@ -106,6 +106,23 @@ which keeps $\gradr\Dped$ in the same place.
    + \CCX(x)\,\nFC(0)\,E(x) \right\},
 \label{eq:eq7}
 \end{equation}
+This is \code{eq7_form="complete"} (default). The scipy solver also offers
+\code{eq7_form="paper"}, Saarelma Eq.~15 exactly as printed:
+\begin{equation}
+\frac{d}{dx}\!\left[\gradr \Dped \frac{dn_e}{dx}\right]
+ = -n_e S_i \left\{ -\Dped
+   \left(\frac{dn_e}{dx} - \left.\frac{dn_e}{dx}\right|_{\mathrm{in}}\right)
+   + \CCX(x)\,\nFC(0)\,E(x) \right\}
+ \qquad (\code{eq7_form="paper"}),
+\label{eq:eq7paper}
+\end{equation}
+so $C_A$ below becomes $n_0 L S_i/\gradr$. This is dimensionally
+inconsistent (the first bracketed term lacks $1/(\VCX\fCX)$, so $C_A$ carries
+units of m/s); it is implemented literally, with that coefficient evaluated
+in SI, to reproduce the printed equation. The post-solve $n_{\mathrm{CX}}$
+reconstruction is unchanged. The Firedrake solver always solves the complete
+form.
+
 with the CX-flux coefficient and the FC attenuation (``optical depth'')
 kernel
 \begin{align}
@@ -190,7 +207,7 @@ implementation are
 \end{align}
 with
 \begin{align*}
-C_{A6} &= \frac{n_0 L (S_i+\SCX)}{\gradr\VFC\fFC} \quad(\code{"paper"}),\qquad
+C_{A6} &= \frac{n_0 L (S_i+\SCX)}{\gradr\VFC} \quad(\code{"paper"}, no $\fFC$ as printed),\qquad
 C_{A6} = \frac{n_0 L (S_i+\SCX)}{(1+\SCX/(2S_i))\VFC\fFC} \quad(\code{"complete"}),\\
 C_A &= \frac{n_0 L S_i}{\VCX\fCX},\qquad
 C_E = \frac{L^2 S_i \CCX \nFC(0) E(x)}{f},\\
@@ -566,6 +583,10 @@ changing.
   is only usable when $\gradr$ is close to 1: otherwise it either fails
   outright or converges to a collapsed profile that the Eq.~(7) iteration
   cannot then start from.
+  \item[\code{eq7_form} (\code{"complete"} | \code{"paper"})] Which form of
+  the Eq.~(7) Picard step to solve (scipy only): Eq.~\eqref{eq:eq7} or
+  Saarelma Eq.~15 as printed, Eq.~\eqref{eq:eq7paper}. Independent of
+  \code{eq6_form}.
   \item[\code{first_step} (\code{"auto"} | \code{"eq6"} | \code{"skip"})]
   Whether to run step 1 at all. \code{"eq6"} always runs it and raises if it
   fails; \code{"skip"} starts the Eq.~(7) Picard loop directly from
@@ -576,7 +597,22 @@ changing.
   \item[\code{picard_rtol} (float, $10^{-6}$)] Relative max-norm tolerance
   on the change in $n_e$ between Picard iterations.
   \item[{\code{picard_relax} (float in $(0,1]$)}] Under-relaxation of the
-  frozen $D_{\mathrm{KBM}}$ and $E(x)$ updates.
+  frozen $D_{\mathrm{KBM}}$ and $E(x)$ updates (and of the frozen
+  $D_{\mathrm{TG}}$ with \code{D_TG_treatment="picard"}).
+  \item[\code{D_TG_treatment} (\code{"implicit"} | \code{"picard"})] How the
+  ETG part $D_{\mathrm{TG}} = C_{\mathrm{ETG}}/n_e$ of $\Dped$ is treated.
+  \code{"implicit"} (default) keeps its $1/n_e$ dependence inside the
+  BVP/IVP, as in the $f_0 + f_1/n_e$ split above. \code{"picard"} freezes it
+  like $D_{\mathrm{KBM}}$: at the start of every Picard iteration (and for
+  the first step, from \code{initial_guess}) $h = \gradr C_{\mathrm{ETG}}/n_e$
+  and $dh/dx$ are evaluated from the previous iterate on the uniform grid and
+  interpolated with a $C^1$ cubic Hermite spline, so the whole of $\Dped$ is
+  a fixed function of $x$ within an iteration. Then $f = f_0 + h$,
+  $C_K = (L/f)(df_0/dx + dh/dx)$ and $C_N = 0$, and only the explicit $n_e$
+  factors of Eq.~(7) are solved self-consistently ($E(x)$ is frozen in both
+  modes). Both modes share the same fixed point. The frozen profile of the
+  last solve is stored in \code{D_TG_frozen} (on the uniform grid), and the
+  mode in \code{picard_info} / \code{kbm_info}.
   \item[\code{bvp_tol} (float)] \code{solve_bvp} residual tolerance
   (\code{"inner"} mode only).
   \item[\code{bvp_max_nodes} (int)] \code{solve_bvp} maximum number of mesh

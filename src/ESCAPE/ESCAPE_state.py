@@ -262,6 +262,10 @@ class ESCAPE_state:
         ----
         self.r_psi : ndarray, shape (n_psi,)
             Outboard midplane minor radius for each flux surface (m).
+        self.r_miller : ndarray, shape (n_psi,)
+            Miller minor radius (R_out - R_in)/2 at the axis height (m).
+        self.B_unit : ndarray, shape (n_psi,)
+            Effective field B_unit = (q/r) dpsi/dr, r = r_miller (T).
         self.gradr_c : ndarray, shape (n_psi,)
             |grad(r)| at each contour point on each flux surface.
         self.gradr_fsa : ndarray, shape (n_psi,)
@@ -286,6 +290,17 @@ class ESCAPE_state:
         self.r_psi = np.zeros(n_psi)
         for i, psi_val in enumerate(self.psi_pres):
             self.r_psi[i] = psi_to_R(psi_val) - R_axis
+
+        # Miller minor radius r = (R_out - R_in)/2 at the axis height: inboard
+        # midplane crossing, walking from the axis and stopping just outside the LCFS
+        R_in = np.linspace(R_axis, self.rgrid[0], 500)
+        psi_in = psi_spl(np.full_like(R_in, Z_axis), R_in, grid=False)
+        psiN_in = (psi_in - self.eq['psimag']) / (self.eq['psibry'] - self.eq['psimag'])
+        stop = int(np.argmax(psiN_in > 1.05)) or len(R_in)
+        sort_in = np.argsort(psi_in[:stop])
+        psi_to_R_in = interp1d(psi_in[:stop][sort_in], R_in[:stop][sort_in], kind='linear',
+                               bounds_error=False, fill_value=np.nan)
+        self.r_miller = 0.5 * (self.r_psi + R_axis - psi_to_R_in(self.psi_pres)) # m
 
         dr_dpsi = np.gradient(self.r_psi, self.psi_N_pres) # (m) / (dimensionless), change in r_midplane(psi_N) over psi_N
 
@@ -324,12 +339,19 @@ class ESCAPE_state:
         plt.close(fig)
 
         # Fill NaN/zero entries (near-axis or separatrix edge cases) by extrapolating from the nearest valid neighbours.
-        for arr in (self.r_psi, self.gradr_fsa, self.gradr2_fsa):
+        for arr in (self.r_psi, self.r_miller, self.gradr_fsa, self.gradr2_fsa):
             valid = np.isfinite(arr) & (arr != 0)
             if valid.any() and not valid.all():
                 arr[:] = interp1d(self.psi_N_pres[valid], arr[valid],
                                   kind='linear', bounds_error=False,
                                   fill_value='extrapolate')(self.psi_N_pres)
+
+        # B_unit = (q/r) dpsi/dr with r the Miller minor radius and psi the poloidal
+        # flux per radian (R.E. Waltz and R.L. Miller 1999 Phys. Plasmas 6 4265;
+        # W. Guttenfelder et al 2021 Nucl. Fusion 61 056005 Sec. 3)
+        psi_per_rad = self.psi_pres / (2 * np.pi) ** (1 if self.pol_norm else 0) # Wb/rad
+        q = np.abs(np.asarray(self.eq['qpsi'], dtype=float)[1:]) # qpsi shares the pres grid; [1:] drops the axis as psi_pres does
+        self.B_unit = np.abs(q / self.r_miller * np.gradient(psi_per_rad, self.r_miller)) # T, on psi_N_pres
 
     def plasma_surface_area_and_volume(self):
         """Compute the plasma surface area and enclosed volume at each flux surface.

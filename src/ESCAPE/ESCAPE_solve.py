@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]  # ESCAPE root (src/ESCAPE/..)
 sys.path.insert(0, str(ROOT))
 from src.ESCAPE.ESCAPE_api import ESCAPE
 from helpers.ped_width_proxy import ped_width
+from helpers.elmfree_scalings import elmfree_scaling
 
 
 def ESCAPE_solve(
@@ -237,18 +238,12 @@ def ESCAPE_solve(
         T_prof_keV = np.concatenate([Te_prev_keV[keep] + T_e_offset, Te_tanh_eV / 1e3])
 
         # -- -- -- -- -- -- ELM-free SCALING -- -- -- -- -- --
-        '''
-        NOT YET IMPLEMENTED
-
         # Apply ELM-free regime scaling
-        if self.regime_flag == 'PT H-mode':
+        if state.regime_flag == 'PT H-mode':
             pass
-        elif self.regime_flag == 'NT':
-            self.pedestal_pressure = self.pedestal_pressure * self.NT_scaling
-            raise NotImplementedError('NT ELM-free regime scaling is not yet implemented')
         else:
-            assert False, 'specified regime_flag not supported'
-        '''
+            elmfree_scaling()
+
         
         # Update temperature state (include core profile); T_i follows T_e when T_rat_flag
         state.set_kprof_params({'T_e': T_prof_keV, 'psin_Te': psi_N_Te_new})
