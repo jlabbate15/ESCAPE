@@ -190,8 +190,8 @@ def calc_pressure_profile(profiles):
     """
     Thermal pressure from kinetic profiles on a psi_N grid.
 
-    Defaults to ``p = 2 * ne * Te`` (Te = Ti, ne = ni). If ``Ti`` is present,
-    uses ``p = ne * Te + ni * Ti``, with ``ni = ne`` when ``ni`` is missing.
+    Defaults to ``p = 2 * ne * Te`` (Te = Ti, ne = ni). If ``T_i`` is present,
+    uses ``p = ne * Te + ni * Ti``, with ``ni = ne`` when ``n_i`` is missing.
 
     Accepts either:
       - SPARCPublic ``profiles`` (``ne`` [m^-3], ``Te``/``Ti`` [keV], ``polflux``)
@@ -218,18 +218,18 @@ def calc_pressure_profile(profiles):
         psi_N, _ = psi_n_and_rho_psi(profiles)
         ne = _density_to_m3(profiles['n_e'], profiles)
         Te_keV = np.asarray(profiles['T_e'], dtype=float)
-        Ti_keV = np.asarray(profiles['T_i'], dtype=float) if 'Ti' in profiles else None
-        ni = _density_to_m3(profiles['n_i'], profiles) if 'ni' in profiles else None
+        Ti_keV = np.asarray(profiles['T_i'], dtype=float) if 'T_i' in profiles else None
+        ni = _density_to_m3(profiles['n_i'], profiles) if 'n_i' in profiles else None
     elif 'psin_ne' in profiles and 'psin_Te' in profiles:
         psi_N = np.asarray(profiles['psin_ne'], dtype=float)
         ne = _density_to_m3(profiles['n_e'], profiles)
         Te_keV = _interp_to_psi(profiles['psin_Te'], profiles['T_e'], psi_N)
-        if 'Ti' in profiles:
+        if 'T_i' in profiles:
             psi_Ti = profiles.get('psin_Ti', profiles['psin_Te'])
             Ti_keV = _interp_to_psi(psi_Ti, profiles['T_i'], psi_N)
         else:
             Ti_keV = None
-        if 'ni' in profiles:
+        if 'n_i' in profiles:
             psi_ni = profiles.get('psin_ni', profiles['psin_ne'])
             ni = _density_to_m3(
                 _interp_to_psi(psi_ni, profiles['n_i'], psi_N), profiles
@@ -247,12 +247,12 @@ def calc_pressure_profile(profiles):
         psi_N = _psi_n_from_rho(rho_ne)
         ne = _density_to_m3(profiles['n_e'], profiles)
         Te_keV = _interp_to_psi(_psi_n_from_rho(rho_Te), profiles['T_e'], psi_N)
-        if 'Ti' in profiles:
+        if 'T_i' in profiles:
             rho_Ti = profiles.get('rho_Ti', rho_Te)
             Ti_keV = _interp_to_psi(_psi_n_from_rho(rho_Ti), profiles['T_i'], psi_N)
         else:
             Ti_keV = None
-        if 'ni' in profiles:
+        if 'n_i' in profiles:
             rho_ni = profiles.get('rho_ni', rho_ne)
             ni = _density_to_m3(
                 _interp_to_psi(_psi_n_from_rho(rho_ni), profiles['n_i'], psi_N),

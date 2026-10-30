@@ -9,8 +9,8 @@ cd "$(dirname "$0")"
 # ne_grad_bc_locs=('inner' 'outer')
 sc_models=('1D')
 sc_implementations=('scipy')
-ne_grad_bc_locs=('outer')
-run_suffix='_nfc_conv'
+ne_grad_bc_locs=('inner')
+run_suffix='biggerscan'
 picard_relax="${PICARD_RELAX:-1:1.0;11:0.5;31:0.2}"
 eq6_form="${EQ6_FORM:-complete}"
 eq7_form="${EQ7_FORM:-complete}"
@@ -21,6 +21,9 @@ picard_gate_mode="${PICARD_GATE_MODE:-steep_grad}"  # 'average' or 'steep_grad'
 bvp_tol="${BVP_TOL:-1e-5}"                # solve_bvp tolerance ('inner', scipy only)
 bvp_max_nodes="${BVP_MAX_NODES:-20000}"    # solve_bvp max mesh nodes ('inner', scipy only)
 run_suffix="${RUN_SUFFIX:-$run_suffix}"
+# First-iteration n_e pedestal top (helpers/ped_width_proxy.ped_top_width): 'tanh', 'grad', 'lin',
+# 'tanh+grad', 'tanh+lin', 'grad+lin', 'all' (psi_N = 1 - width), or 'corner' (two-line fit corner)
+ped_width_method="${PED_WIDTH_METHOD:-tanh+grad}"
 
 for sc_model in "${sc_models[@]}"; do
   for sc_implementation in "${sc_implementations[@]}"; do
@@ -31,7 +34,7 @@ for sc_model in "${sc_models[@]}"; do
         --job-name="${name}" \
         --output="${name}_%j.out" \
         --error="${name}_%j.err" \
-        --export=ALL,SC_MODEL="${sc_model}",SC_IMPLEMENTATION="${sc_implementation}",NE_GRAD_BC_LOC="${ne_grad_bc_loc}",RUN_SUFFIX="${run_suffix}",PICARD_RELAX="${picard_relax}",PICARD_REL_TOL="${picard_rel_tol}",EQ6_FORM="${eq6_form}",EQ7_FORM="${eq7_form}",IMPURITY_DILUTION="${impurity_dilution}",D_TG_TREATMENT="${d_tg_treatment}",PICARD_GATE_MODE="${picard_gate_mode}",BVP_TOL="${bvp_tol}",BVP_MAX_NODES="${bvp_max_nodes}" \
+        --export=ALL,SC_MODEL="${sc_model}",SC_IMPLEMENTATION="${sc_implementation}",NE_GRAD_BC_LOC="${ne_grad_bc_loc}",RUN_SUFFIX="${run_suffix}",PICARD_RELAX="${picard_relax}",PICARD_REL_TOL="${picard_rel_tol}",EQ6_FORM="${eq6_form}",EQ7_FORM="${eq7_form}",IMPURITY_DILUTION="${impurity_dilution}",D_TG_TREATMENT="${d_tg_treatment}",PICARD_GATE_MODE="${picard_gate_mode}",BVP_TOL="${bvp_tol}",BVP_MAX_NODES="${bvp_max_nodes}",PED_WIDTH_METHOD="${ped_width_method}" \
         scan_SCfp_ESCAPE_ARC.slurm
     done
   done

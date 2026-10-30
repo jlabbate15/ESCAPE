@@ -222,6 +222,52 @@ class NeBCs:
         )
 
 
+def check_picard_relax(picard_relax):
+    """Validate ``picard_relax`` and return ``(relax_at, spec)``.
+
+    ``picard_relax`` is either a float in (0, 1] used for every Picard
+    iteration, or a schedule ``[(it_start, relax), ...]``: ``relax``
+    applies from Picard iteration ``it_start`` (1-based) until the next
+    entry's ``it_start``.  The first entry must start at iteration 1.
+    E.g. ``[(1, 1.0), (11, 0.5), (31, 0.2)]`` is undamped for 10
+    iterations, then relax = 0.5 to iteration 30, then 0.2 (damping
+    1 - relax = 0, 0.5, 0.8).  ``relax_at(it)`` gives the value for
+    iteration ``it``; ``spec`` is a JSON-friendly copy for kbm_info.
+    Shared by the 1D and 3D solvers.
+    """
+    if np.isscalar(picard_relax):
+        schedule = [(1, float(picard_relax))]
+    else:
+        try:
+            schedule = sorted((int(s), float(r)) for s, r in picard_relax)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "picard_relax must be a float in (0, 1] or a list of "
+                f"(it_start, relax) pairs, got {picard_relax!r}."
+            ) from None
+        if not schedule or schedule[0][0] != 1:
+            raise ValueError(
+                "a picard_relax schedule must start at iteration 1, got "
+                f"{picard_relax!r}."
+            )
+        if len({s for s, _ in schedule}) != len(schedule):
+            raise ValueError(
+                "picard_relax schedule has duplicate start iterations: "
+                f"{picard_relax!r}."
+            )
+    for _, r in schedule:
+        if not (0.0 < r <= 1.0):
+            raise ValueError(f"picard_relax must be in (0, 1], got {r}.")
+    starts = np.array([s for s, _ in schedule])
+    values = [r for _, r in schedule]
+
+    def relax_at(it):
+        return values[np.searchsorted(starts, it, side="right") - 1]
+
+    spec = values[0] if len(schedule) == 1 else [list(e) for e in schedule]
+    return relax_at, spec
+
+
 def check_ne_bc_loc(ne_bc_loc):
     """Validate and normalise the boundary-condition pathway flag.
 

@@ -352,6 +352,40 @@ def ped_width(x, n, method=DEFAULT_METHOD):
     return ped_width_all(x, n, method=method)['width']
 
 
+TOP_METHODS = ('corner',)  # pedestal-top methods accepted by ped_top_width on top of parse_method's
+
+
+def check_top_method(method):
+    """Raise ValueError unless `method` is valid for ped_top_width."""
+    if not (isinstance(method, str) and method in TOP_METHODS):
+        try:
+            parse_method(method)
+        except ValueError as err:
+            raise ValueError(f"{err}, or one of {TOP_METHODS}") from None
+
+
+def ped_top_width(x, n, method=DEFAULT_METHOD):
+    """
+    Distance (input x units) from the outer edge of the profile to the
+    pedestal top, i.e. 1 - psi_N(top) for a profile ending at psi_N = 1.
+
+    `method` is any ped_width method ('tanh+grad' default, 'tanh', 'grad',
+    'lin', 'all', ...), for which this is ped_width, or 'corner': the corner
+    of the two-line fit. ped_width puts the top at edge - width, which lands
+    mid-gradient when the profile flattens to a foot inside the edge (e.g.
+    SPARC's n_e, whose foot sits at psi_N ~ 0.99); the corner does not
+    assume where the pedestal ends.
+    """
+    check_top_method(method)
+    if method != 'corner':
+        return ped_width(x, n, method=method)
+    res = ped_width_all(x, n, method='lin')  # raises RuntimeError if the two-line fit fails
+    x0, L, sign, _ = res['norm']
+    edge = sign * (x0 + L)
+    top = sign * (x0 + L * res['lin']['top'])
+    return float(abs(edge - top))
+
+
 def ped_center(x, n, method=DEFAULT_METHOD, res=None):
     """
     Pedestal centre in x units: halfway between the start of the fall-off and

@@ -10,7 +10,7 @@ from scipy.interpolate import interp1d
 ROOT = Path(__file__).resolve().parents[2]  # ESCAPE root (src/ESCAPE/..)
 sys.path.insert(0, str(ROOT))
 from src.ESCAPE.ESCAPE_api import ESCAPE
-from helpers.ped_width_proxy import ped_width
+from helpers.ped_width_proxy import ped_top_width, check_top_method
 from helpers.elmfree_scalings import elmfree_scaling
 
 
@@ -23,6 +23,7 @@ def ESCAPE_solve(
     ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
     tanh_center_psiN = None, # psi_N, centre of the tanh n_e initial guess (converted to SI x for sc_params['tanh_center']); None keeps sc_params as is, >= 1 uses the tanh_center=None default
     psiN_pwg = None, # psi_N, pedestal top (1 - pedestal width) for the 'tanh_linear' n_e initial guess (converted to SI x for sc_params['x_pwg'])
+    ped_width_method = 'tanh+grad', # helpers/ped_width_proxy method locating the first-iteration n_e pedestal top: 'tanh', 'grad', 'lin', 'tanh+grad', ..., 'all', or 'corner'
     equil_params = None, # dictionary of required equilibrium parameters
     kprof_params = None, # dictionary of required kinetic profile (density, temperature) parameters
     quasineutral_flag = True,
@@ -55,9 +56,17 @@ def ESCAPE_solve(
         initial guess. On the first ESCAPE iteration it is mapped to the SI x
         grid, clipped to lie inside (x_inner, 0), and stored as
         sc_params['x_pwg'].
+    ped_width_method : str
+        How the first ESCAPE iteration locates the pedestal top on the
+        Saarelma-Connor n_e, where EPEDNN reads neped (later iterations use
+        the previous EPEDNN width). Any helpers/ped_width_proxy.ped_width
+        method ('tanh+grad' default, 'tanh', 'grad', 'lin', 'tanh+lin',
+        'grad+lin', 'all'), for a top at psi_N = 1 - width, or 'corner', for
+        the corner of the two-line fit. See ped_top_width.
     out_dir : str
         Path to directory to save successful solutions from the Saarelma-Connor model.
     """
+    check_top_method(ped_width_method) # fail before the setup, not on the first EPEDNN call
 
     state = ESCAPE(
         Z_eff = Z_eff,
@@ -184,7 +193,10 @@ def ESCAPE_solve(
         if ESCAPE_iter == 0:
             pedestal_height_prev = 0.0
             pedestal_width_prev = 0.0
-            pw = ped_width(state.psi_ne_eval, state.n_e) # pedestal width from proxy for first ESCAPE iteration
+            pw = ped_top_width(state.psi_ne_eval, state.n_e, method=ped_width_method) # 1 - pedestal top from proxy for first ESCAPE iteration
+            print(f"First-iteration pedestal top ({ped_width_method}): psi_N = {1.0 - pw:.4f}")
+            state.ped_width_method = ped_width_method
+            state.ped_width_proxy = float(pw)
 
             pedestal_height, pedestal_width, betan = state.feed_epednn(model=epednn_params['epednn_model'], psin_ped=pw, pres_gfile=epednn_params['pres_gfile'])    
         else:
@@ -256,6 +268,7 @@ def ESCAPE_solve(
         sol['Te_ped_eV'] = float(Te_ped_eV)
         sol['ne_ped_val'] = float(ne_ped_val)
         sol['psi_ped'] = float(psi_ped)
+        sol['ped_width_method'] = ped_width_method # sets the first iteration's psi_ped only
         sol['pedestal_height'] = float(pedestal_height)
         sol['pedestal_width'] = float(pedestal_width)
         sol['model'] = res['model']

@@ -668,6 +668,8 @@ class ThreeDSolverMixin:
                                    verbose=None):
         """scipy solver for the coupled model, with state
         Y = [hat_n_e, Phi, U, W] and a Picard loop on D_KBM.
+        ``picard_relax`` is a float or a per-iteration schedule
+        ``[(it_start, relax), ...]`` (see bc_ig_helpers.check_picard_relax).
         ``ne_grad_bc_loc="inner"`` is a BVP solved by ``solve_bvp``
         collocation (``bvp_tol``, ``bvp_max_nodes``); ``"outer"`` puts all
         four conditions at the separatrix, so it is an IVP integrated inward
@@ -690,11 +692,7 @@ class ThreeDSolverMixin:
                 "on hat_n_e' and turns Phi -> hat_n_e' into a per-point "
                 "root-find; use implementation='firedrake' for it."
             )
-        picard_relax = float(picard_relax)
-        if not (0.0 < picard_relax <= 1.0):
-            raise ValueError(
-                f"picard_relax must be in (0, 1], got {picard_relax}."
-            )
+        relax_at, picard_relax = bcig.check_picard_relax(picard_relax)
 
         # Equilibrium / kinetic / ETG setup -- pure numpy, no Firedrake.
         # apply_free_params() first: construct_C_ETG() consumes De_chie_etg,
@@ -868,8 +866,9 @@ class ThreeDSolverMixin:
                 hat_x_dofs=hat_x,
             )
             gate_now = bool(self.kbm_gate_on)
-            hat_D_KBM = (picard_relax * self._hat_D_KBM
-                         + (1.0 - picard_relax) * hat_D_KBM)
+            relax = relax_at(it)
+            hat_D_KBM = (relax * self._hat_D_KBM
+                         + (1.0 - relax) * hat_D_KBM)
 
             picard_history.append({
                 "iteration":        it,
@@ -877,6 +876,7 @@ class ThreeDSolverMixin:
                 "alpha_frac_above": float(self.alpha_frac_above),
                 "kbm_gate_on":      gate_now,
                 "dne_rel":          float(dn_rel),
+                "picard_relax":     float(relax),
             })
             if v:
                 print(f"[nondim scipy] picard it {it:3d}: "
@@ -900,6 +900,7 @@ class ThreeDSolverMixin:
             "picard_gate_mode": picard_gate_mode,
             "picard_converged": picard_converged,
             "picard_iterations": n_picard,
+            "picard_relax": picard_relax,
             "implementation": "scipy",
         }
         if not picard_converged:
@@ -1119,11 +1120,8 @@ class ThreeDSolverMixin:
                 "picard_gate_mode must be 'average', 'majority' or 'steep_grad', "
                 f"got {picard_gate_mode!r}."
             )
-        picard_relax = float(picard_relax)
-        if kbm_treatment == "picard" and not (0.0 < picard_relax <= 1.0):
-            raise ValueError(
-                f"picard_relax must be in (0, 1], got {picard_relax}."
-            )
+        if kbm_treatment == "picard":
+            relax_at, picard_relax = bcig.check_picard_relax(picard_relax)
         neutrals_treatment = str(neutrals_treatment).lower()
         if neutrals_treatment not in ("fem", "analytic"):
             raise ValueError(
@@ -1297,7 +1295,7 @@ class ThreeDSolverMixin:
                 "picard_gate_mode": picard_gate_mode,
                 "picard_max_it":    int(picard_max_it),
                 "picard_rtol":      float(picard_rtol),
-                "picard_relax":     float(picard_relax),
+                "picard_relax":     picard_relax,
             })
 
         # ------------------------------------------------------------------
@@ -1450,22 +1448,23 @@ class ThreeDSolverMixin:
                     hat_ne_new, gate_mode=picard_gate_mode,
                 )
                 gate_now = bool(self.kbm_gate_on)
+                relax = relax_at(it)
 
                 # Picard relax and update the frozen KBM coefficients
                 # (Functions referenced by F; no form rebuild needed).
                 if picard_gate_mode in ("average", "steep_grad"):
-                    hat_A_KBM_picard_fd.dat.data[:] = ( # = self._hat_D_KBM if picard_relax == 1.0. hat_A_KBM_picard_fd is frozen from the previous iterate.
-                        picard_relax * self._hat_D_KBM
-                        + (1.0 - picard_relax) * hat_A_KBM_picard_fd.dat.data
+                    hat_A_KBM_picard_fd.dat.data[:] = ( # = self._hat_D_KBM if relax == 1.0. hat_A_KBM_picard_fd is frozen from the previous iterate.
+                        relax * self._hat_D_KBM
+                        + (1.0 - relax) * hat_A_KBM_picard_fd.dat.data
                     )
                 else:  # majority: freeze A/B
                     hat_A_KBM_picard_fd.dat.data[:] = (
-                        picard_relax * self._hat_A_KBM
-                        + (1.0 - picard_relax) * hat_A_KBM_picard_fd.dat.data
+                        relax * self._hat_A_KBM
+                        + (1.0 - relax) * hat_A_KBM_picard_fd.dat.data
                     )
                     hat_B_KBM_picard_fd.dat.data[:] = (
-                        picard_relax * self._hat_B_KBM
-                        + (1.0 - picard_relax) * hat_B_KBM_picard_fd.dat.data
+                        relax * self._hat_B_KBM
+                        + (1.0 - relax) * hat_B_KBM_picard_fd.dat.data
                     )
 
                 # Refreeze the analytic neutrals from the newly solved
@@ -1477,12 +1476,12 @@ class ThreeDSolverMixin:
                         )
                     )
                     hat_nFC_frozen_fd.dat.data[:] = (
-                        picard_relax * hat_nFC_a
-                        + (1.0 - picard_relax) * hat_nFC_frozen_fd.dat.data
+                        relax * hat_nFC_a
+                        + (1.0 - relax) * hat_nFC_frozen_fd.dat.data
                     )
                     hat_nCX_frozen_fd.dat.data[:] = (
-                        picard_relax * hat_nCX_a
-                        + (1.0 - picard_relax) * hat_nCX_frozen_fd.dat.data
+                        relax * hat_nCX_a
+                        + (1.0 - relax) * hat_nCX_frozen_fd.dat.data
                     )
 
                 picard_history.append({
@@ -1491,6 +1490,7 @@ class ThreeDSolverMixin:
                     "alpha_frac_above": float(self.alpha_frac_above),
                     "kbm_gate_on":      gate_now,
                     "dne_rel":          float(dn_rel),
+                    "picard_relax":     float(relax),
                 })
                 if v:
                     print(

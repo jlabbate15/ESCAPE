@@ -15,15 +15,15 @@ import time
 
 
 # ---------------------- COMMON USER INPUTS ----------------------
-equil_num = None # None for all
+equil_num = 5 # None for all
 # equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
 equil_list = None
 
 alpha_crits = np.array([0.01])
-nFC_x0s = np.array([1e15])
+nFC_x0s = [1e13,1e14,5e14,1e15,5e15,1e16,5e16,1e17,5e17,1e18,5e18,1e19,5e19,1e20,5e20,1e21,5e21,1e22,5e22,1e23]
 C_KBMs = np.array([0.0])
-De_chie_etgs = np.array([0.1])
-ncx_x0_ratios = np.array([15])
+De_chie_etgs = [0.001,0.01,0.1,1,10]
+ncx_x0_ratios = [1.0]
 
 # Overridable from the environment (see submit_scan.sh)
 sc_model = os.environ.get('SC_MODEL', '1D')
@@ -43,6 +43,9 @@ D_TG_treatment = os.environ.get('D_TG_TREATMENT', 'implicit') # 'implicit' or 'p
 picard_gate_mode = os.environ.get('PICARD_GATE_MODE', 'steep_grad') # 'average' or 'steep_grad' (KBM alpha gate)
 bvp_tol = float(os.environ.get('BVP_TOL', 1e-6)) # solve_bvp tolerance ('inner', scipy only)
 bvp_max_nodes = int(os.environ.get('BVP_MAX_NODES', 5000)) # solve_bvp max mesh nodes ('inner', scipy only)
+# First-iteration n_e pedestal top, where EPEDNN reads neped (helpers/ped_width_proxy.ped_top_width):
+# 'tanh', 'grad', 'lin', 'tanh+grad', ..., 'all' (psi_N = 1 - width), or 'corner' (two-line fit corner)
+ped_width_method = os.environ.get('PED_WIDTH_METHOD', 'tanh+grad')
 
 output_dir = f'outputs/DIIIDSnyder_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}_{run_suffix}'
 # ----------------------------------------------------------------
@@ -140,9 +143,14 @@ def state_to_dict(state):
     The state object itself can't be pickled: it holds the juliacall EPEDNN
     model and (after a Firedrake solve) Firedrake meshes/Functions. Those
     attributes are left out and their names recorded under '_not_saved'.
+    juliacall values (epednn_model) do pickle, but only unpickle in a process
+    with the Julia model loaded, so they are left out too.
     """
     saved, not_saved = {}, []
     for name, val in vars(state).items():
+        if type(val).__module__.startswith('juliacall'):
+            not_saved.append(name)
+            continue
         try:
             pickle.dumps(val)
         except Exception:
@@ -294,6 +302,7 @@ for mhd_fp, kprof_fp in equilibria:
                     Z_eff = Z_eff, 
                     P_tot_e = P_tot_e, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
                     ne_x0 = ne_x0, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
+                    ped_width_method = ped_width_method, # first-iteration n_e pedestal top
                     equil_params = equil_params, # dictionary of required equilibrium parameters
                     kprof_params = kprof_params, # dictionary of required kinetic profile (density, temperature) parameters
                     quasineutral_flag = quasineutral_flag,
@@ -330,6 +339,7 @@ for mhd_fp, kprof_fp in equilibria:
                     'ESCAPE_ped_wid': ped_wid,
                     'experimental_ped_h': p_at_ped_top, # Pa
                     'free_params': free_params,
+                    'ped_width_method': ped_width_method,
                     'p_mode': p_mode,
                     'Zeff': Z_eff,
                     'P_tot_e': P_tot_e,
