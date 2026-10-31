@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-# Firedrake venv (also sets PETSc env vars and MPLBACKEND=Agg)
+# venv (also sets PETSc env vars and MPLBACKEND=Agg)
 source /mnt/codes/jal2351/venv/bin/activate
 
 # Keep threading to a single CPU for this serial run
