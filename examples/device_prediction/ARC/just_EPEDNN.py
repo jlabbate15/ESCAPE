@@ -15,13 +15,13 @@ import time
 
 # ---------------------- COMMON USER INPUTS ----------------------
 # Filepath to geqdsk equilibrium state and profiles
-mhd_fp = HERE / 'geqdsk-ARCv3a'
+mhd_fp = HERE / 'geqdsk-ARCv3a_fixedbdry'
 ne_fp = HERE / 'ARC_ne.csv'
 Te_fp = HERE / 'ARC_Te.csv'
 
 # Pedestal top used to read neped off the input n_e profile: psi_N = 1 - width,
 # with width from helpers/ped_width_proxy (as on ESCAPE_solve's first iteration)
-PED_WIDTH_METHOD = os.environ.get('PED_WIDTH_METHOD', 'tanh+grad') # 'tanh', 'grad', 'lin', 'tanh+grad', ..., 'all'
+PED_WIDTH_METHOD = os.environ.get('PED_WIDTH_METHOD', 'tanh') # 'tanh', 'grad', 'lin', 'tanh+grad', ..., 'all'
 
 run_suffix = os.environ.get('RUN_SUFFIX', '')
 
@@ -139,7 +139,7 @@ quasineutral_flag = True
 T_rat_flag = True # True if using a temperature ratio between ions and electrons, False if doing something else
 T_rat = 1
 pol_norm = False # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
-species = 'D' # species of ions, currently supporting: D, D-T
+species = 'D-T' # species of ions, currently supporting: D, D-T
 regime_flag = 'PT H-mode' # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
 verbose_ESCAPE = False
 

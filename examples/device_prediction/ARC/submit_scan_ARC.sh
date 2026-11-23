@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 sc_models=('1D')
 sc_implementations=('scipy')
 ne_grad_bc_locs=('inner')
-run_suffix='biggerscan'
+run_suffix='biggerscan_fixedbdry'
 picard_relax="${PICARD_RELAX:-1:1.0;11:0.5;31:0.2}"
 eq6_form="${EQ6_FORM:-complete}"
 eq7_form="${EQ7_FORM:-complete}"

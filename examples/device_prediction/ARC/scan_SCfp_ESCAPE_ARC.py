@@ -23,7 +23,7 @@ De_chie_etgs = [0.001,0.01,0.1,1,10]
 ncx_x0_ratios = np.array([15])
 
 # Filepath to geqdsk equilibrium state and profiles
-mhd_fp = 'geqdsk-ARCv3a'
+mhd_fp = 'geqdsk-ARCv3a_fixedbdry'
 ne_fp = 'ARC_ne.csv'
 Te_fp = 'ARC_Te.csv'
 
@@ -157,7 +157,7 @@ quasineutral_flag = True
 T_rat_flag = True # True if using a temperature ratio between ions and electrons, False if doing something else
 T_rat = 1
 pol_norm = False # True for when the poloidal flux is not normalized by 2pi. COCOS 7 convention is pol_norm=False, so poloidal flux is normalized by 2pi
-species = 'D' # species of ions, currently supporting: D, D-T
+species = 'D-T' # species of ions, currently supporting: D, D-T
 regime_flag = 'PT H-mode' # regime of the plasma, currently supporting: 'PT H-mode', 'NT'
 verbose_ESCAPE = False
 
