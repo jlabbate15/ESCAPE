@@ -29,7 +29,7 @@ tokamaker_python_path = os.getenv('OFT_ROOTPATH')
 if tokamaker_python_path is not None:
     sys.path.append(os.path.join(tokamaker_python_path, 'python'))
 
-from src.solver_nondim import saarelma_connor_nondim
+from escape.solver_nondim import saarelma_connor_nondim
 
 # ── Scan grid ────────────────────────────────────────────────────────────────
 N = 3

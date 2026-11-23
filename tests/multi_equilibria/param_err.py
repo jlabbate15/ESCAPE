@@ -6,7 +6,7 @@ from pathlib import Path
 from scipy.interpolate import interp1d
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.solver_nondim import saarelma_connor_nondim
+from escape.solver_nondim import saarelma_connor_nondim
 
 # Global parameters
 equil_num = 100

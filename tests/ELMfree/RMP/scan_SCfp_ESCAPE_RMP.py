@@ -6,8 +6,8 @@ import pickle # to check which state attributes np.save can store
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2] # ESCAPE/
 sys.path.insert(0, str(ROOT))
-from src.ESCAPE.ESCAPE_solve import ESCAPE_solve
-from helpers.parse_equil import mhd_load
+from escape.ESCAPE.ESCAPE_solve import ESCAPE_solve
+from escape.helpers.parse_equil import mhd_load
 from examples.device_prediction.helper_functions import calc_pressure_profile
 from elmfree_inputs import find_pairs, select_pairs, read_ida_cdf, cdf_to_kprof, ipb98_heating_power
 import time

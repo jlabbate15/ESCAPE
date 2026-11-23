@@ -8,7 +8,7 @@ import numpy as np
 
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.profiles_loop_solve_scloop import profiles_loop_solve_scloop
+from escape.profiles_loop_solve_scloop import profiles_loop_solve_scloop
 
 from OpenFUSIONToolkit.TokaMaker.util import read_eqdsk
 

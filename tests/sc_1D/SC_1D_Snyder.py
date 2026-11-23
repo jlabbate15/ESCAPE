@@ -8,9 +8,9 @@ import urllib.request # needed for geqdsk import
 import netCDF4 as nc # OMFIT profile files are netCDF
 ROOT = Path.cwd().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.profiles_loop_solve import profiles_loop_solve
-from ESCAPE.helpers.load_equil import initialize_inputs
-from src.solver_sc import saarelma_connor_sc
+from escape.profiles_loop_solve import profiles_loop_solve
+from escape.helpers.load_equil import initialize_inputs
+from escape.solver_sc import saarelma_connor_sc
 
 tokamaker_python_path = os.getenv('OFT_ROOTPATH')
 if tokamaker_python_path is not None:

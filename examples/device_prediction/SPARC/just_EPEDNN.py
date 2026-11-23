@@ -6,9 +6,9 @@ import pickle # to check which state attributes np.save can store
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent.parent # ESCAPE root (examples/device_prediction/ARC/../../..)
 sys.path.insert(0, str(ROOT))
-from src.ESCAPE.ESCAPE_api import ESCAPE # ESCAPE_state + epednn_class (+ saarelma_connor, unused here)
-from helpers.parse_equil import mhd_load
-from helpers.ped_width_proxy import ped_width, ped_width_all
+from escape.ESCAPE.ESCAPE_api import ESCAPE # ESCAPE_state + epednn_class (+ saarelma_connor, unused here)
+from escape.helpers.parse_equil import mhd_load
+from escape.helpers.ped_width_proxy import ped_width, ped_width_all
 from examples.device_prediction.helper_functions import (calc_pressure_profile, read_sparcpublic_profiles,
                                                          psi_n_and_rho_psi, _print_profile_summary,
                                                          read_popcon, _to_watts)
