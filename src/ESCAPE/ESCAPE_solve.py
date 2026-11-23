@@ -221,7 +221,7 @@ def ESCAPE_solve(
         ne_ped_val = float(interp1d(state.psi_ne_eval, state.n_e, kind='linear',bounds_error=False, fill_value='extrapolate')(psi_ped))
         T_sep_eV = float(np.asarray(state.T_e)[-1] * 1e3)  # keV -> eV
         eV_to_J = 1.602176634e-19
-        Te_ped_eV = (float(pedestal_height) * 1.0e6 / (2.0 * ne_ped_val)) / eV_to_J
+        Te_ped_eV = (float(pedestal_height) * 1.0e6 / (2.0 * ne_ped_val)) / eV_to_J # assumes Ti = Te and Zeff ~ 1, p_ped = 2 * ne_ped * Te_ped
         tanh_peak = 2.0 * np.tanh(1.0)  # shape-function maximum on [psi_ped, 1]
         aT0 = (Te_ped_eV - T_sep_eV) / tanh_peak
 
