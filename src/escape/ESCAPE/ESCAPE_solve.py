@@ -7,8 +7,8 @@ from matplotlib.colors import LinearSegmentedColormap
 from scipy.interpolate import interp1d
 
 from escape.ESCAPE.ESCAPE_api import ESCAPE
-from escape.helpers.ped_width_proxy import ped_width
-
+from escape.helpers.ped_width_proxy import ped_width, ped_top_width, check_top_method
+from escape.helpers.elmfree_scalings import elmfree_scaling
 
 def ESCAPE_solve(
     sc_params,
@@ -19,6 +19,7 @@ def ESCAPE_solve(
     ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
     tanh_center_psiN = None, # psi_N, centre of the tanh n_e initial guess (converted to SI x for sc_params['tanh_center']); None keeps sc_params as is, >= 1 uses the tanh_center=None default
     psiN_pwg = None, # psi_N, pedestal top (1 - pedestal width) for the 'tanh_linear' n_e initial guess (converted to SI x for sc_params['x_pwg'])
+    ped_width_method = 'tanh+grad', # helpers/ped_width_proxy method locating the first-iteration n_e pedestal top: 'tanh', 'grad', 'lin', 'tanh+grad', ..., 'all', or 'corner'
     equil_params = None, # dictionary of required equilibrium parameters
     kprof_params = None, # dictionary of required kinetic profile (density, temperature) parameters
     quasineutral_flag = True,
@@ -53,6 +54,13 @@ def ESCAPE_solve(
         initial guess. On the first ESCAPE iteration it is mapped to the SI x
         grid, clipped to lie inside (x_inner, 0), and stored as
         sc_params['x_pwg'].
+    ped_width_method : str
+        How the first ESCAPE iteration locates the pedestal top on the
+        Saarelma-Connor n_e, where EPEDNN reads neped (later iterations use
+        the previous EPEDNN width). Any helpers/ped_width_proxy.ped_width
+        method ('tanh+grad' default, 'tanh', 'grad', 'lin', 'tanh+lin',
+        'grad+lin', 'all'), for a top at psi_N = 1 - width, or 'corner', for
+        the corner of the two-line fit. See ped_top_width.
     out_dir : str or None
         Path to directory to save successful solutions from the Saarelma-Connor model.
         The directory is emptied first, then gets one ne_and_Te_iter_{k}.npy file
@@ -74,6 +82,7 @@ def ESCAPE_solve(
         dict) are shared with the running solve, so a callback that keeps
         values must copy them.
     """
+    check_top_method(ped_width_method) # fail before the setup, not on the first EPEDNN call
 
     state = ESCAPE(
         Z_eff = Z_eff,
@@ -201,7 +210,10 @@ def ESCAPE_solve(
         if ESCAPE_iter == 0:
             pedestal_height_prev = 0.0
             pedestal_width_prev = 0.0
-            pw = ped_width(state.psi_ne_eval, state.n_e) # pedestal width from proxy for first ESCAPE iteration
+            pw = ped_top_width(state.psi_ne_eval, state.n_e, method=ped_width_method) # 1 - pedestal top from proxy for first ESCAPE iteration
+            print(f"First-iteration pedestal top ({ped_width_method}): psi_N = {1.0 - pw:.4f}")
+            state.ped_width_method = ped_width_method
+            state.ped_width_proxy = float(pw)
 
             pedestal_height, pedestal_width, betan = state.feed_epednn(model=epednn_params['epednn_model'], psin_ped=pw, pres_gfile=epednn_params['pres_gfile'])    
         else:
@@ -226,7 +238,7 @@ def ESCAPE_solve(
         ne_ped_val = float(interp1d(state.psi_ne_eval, state.n_e, kind='linear',bounds_error=False, fill_value='extrapolate')(psi_ped))
         T_sep_eV = float(np.asarray(state.T_e)[-1] * 1e3)  # keV -> eV
         eV_to_J = 1.602176634e-19
-        Te_ped_eV = (float(pedestal_height) * 1.0e6 / (2.0 * ne_ped_val)) / eV_to_J
+        Te_ped_eV = (float(pedestal_height) * 1.0e6 / (2.0 * ne_ped_val)) / eV_to_J # assumes Ti = Te and Zeff ~ 1, p_ped = 2 * ne_ped * Te_ped
         tanh_peak = 2.0 * np.tanh(1.0)  # shape-function maximum on [psi_ped, 1]
         aT0 = (Te_ped_eV - T_sep_eV) / tanh_peak
 
@@ -255,18 +267,12 @@ def ESCAPE_solve(
         T_prof_keV = np.concatenate([Te_prev_keV[keep] + T_e_offset, Te_tanh_eV / 1e3])
 
         # -- -- -- -- -- -- ELM-free SCALING -- -- -- -- -- --
-        '''
-        NOT YET IMPLEMENTED
-
         # Apply ELM-free regime scaling
-        if self.regime_flag == 'PT H-mode':
+        if state.regime_flag == 'PT H-mode':
             pass
-        elif self.regime_flag == 'NT':
-            self.pedestal_pressure = self.pedestal_pressure * self.NT_scaling
-            raise NotImplementedError('NT ELM-free regime scaling is not yet implemented')
         else:
-            assert False, 'specified regime_flag not supported'
-        '''
+            elmfree_scaling()
+
         
         # Update temperature state (include core profile); T_i follows T_e when T_rat_flag
         state.set_kprof_params({'T_e': T_prof_keV, 'psin_Te': psi_N_Te_new})
@@ -279,6 +285,7 @@ def ESCAPE_solve(
         sol['Te_ped_eV'] = float(Te_ped_eV)
         sol['ne_ped_val'] = float(ne_ped_val)
         sol['psi_ped'] = float(psi_ped)
+        sol['ped_width_method'] = ped_width_method # sets the first iteration's psi_ped only
         sol['pedestal_height'] = float(pedestal_height)
         sol['pedestal_width'] = float(pedestal_width)
         sol['model'] = res['model']

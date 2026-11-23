@@ -30,11 +30,20 @@ ncx_x0_ratios = np.array([15])
 sc_model = os.environ.get('SC_MODEL', '1D')
 sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'scipy')
 ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'outer')
-picard_relax = float(os.environ.get('PICARD_RELAX', 1.0))
-picard_max_it = int(os.environ.get('PICARD_MAX_IT', 50))
-run_suffix = os.environ.get('RUN_SUFFIX', '_V4_fullP')
+picard_relax = os.environ.get('PICARD_RELAX', '1.0') # float, or a schedule 'it:relax;it:relax;...' (no commas: sbatch --export splits on them)
+picard_relax = ([(int(s), float(r)) for s, r in (e.split(':') for e in picard_relax.split(';'))]
+                if ':' in picard_relax else float(picard_relax))
+picard_max_it = int(os.environ.get('PICARD_MAX_IT', 100))
+picard_rel_tol = float(os.environ.get('PICARD_REL_TOL', 1e-2)) # 0.01=1%
+run_suffix = os.environ.get('RUN_SUFFIX', '')
+eq6_form = os.environ.get('EQ6_FORM', 'complete') # 'complete' or 'paper'
+eq7_form = os.environ.get('EQ7_FORM', 'complete') # 'complete' or 'paper' (1D scipy only)
+impurity_dilution = os.environ.get('IMPURITY_DILUTION', 'none') # 'none' or 'carbon' (1D scipy only; KBM alpha)
+impurity_dilution = None if impurity_dilution.lower() == 'none' else impurity_dilution
+D_TG_treatment = os.environ.get('D_TG_TREATMENT', 'implicit') # 'implicit' or 'picard' (1D scipy only)
+picard_gate_mode = os.environ.get('PICARD_GATE_MODE', 'steep_grad') # 'average' or 'steep_grad' (KBM alpha gate)
 
-output_dir = f'outputs/DIIIDDunsmore_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}{run_suffix}_moregrid'
+output_dir = f'outputs/DIIIDDunsmore_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}_{run_suffix}'
 # ----------------------------------------------------------------
 
 
@@ -141,16 +150,16 @@ sc_params = {
 
 # Saarelma-Connor (SC) shared solver parameters
 sc_params.update({
-    'x_res':400,
+    'x_res':40,
     'ne_grad_bc_loc':ne_grad_bc_loc,
     # 'Saarelma2023' (Eq. 20 separatrix gradient) needs the Neumann BC at the
     # separatrix, so the 'inner' runs fall back to the state.n_e gradient
     'dne_method': 'Saarelma2023' if ne_grad_bc_loc == 'outer' else 'state',
     'tau_par': 1e-3 if ne_grad_bc_loc == 'outer' else None, # s, parallel loss time (Saarelma2023 only)
     'initial_guess':'tanh', # ESCAPE_solve overrides: 'tanh' on the first ESCAPE iteration, 'state' after
-    'picard_gate_mode':'steep_grad',
+    'picard_gate_mode':picard_gate_mode,
     'picard_max_it':picard_max_it,
-    'picard_rtol':1e-6,
+    'picard_rtol':picard_rel_tol,
     'picard_relax':picard_relax,
     'reuse_setup':False,
 })
@@ -185,8 +194,11 @@ sc_params.update({
 
 # SC 1D specific
 sc_params.update({
-    'eq6_form':"complete",
+    'eq6_form':eq6_form,
+    'eq7_form':eq7_form, # scipy only
+    'impurity_dilution':impurity_dilution, # scipy only
     'first_step':"auto",
+    'D_TG_treatment':D_TG_treatment, # scipy only
 })
 
 # EPEDNN parameters

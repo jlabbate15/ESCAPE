@@ -685,10 +685,14 @@ KBM gate (Heaviside on $\alpha-\alpha_{\mathrm{crit}}$) is handled.
   (\code{"picard"} only).
   \item[\code{picard_rtol} (float, $10^{-8}$)] Relative $L^2$ tolerance on
   the change in $\hne$ between Picard iterations (\code{"picard"} only).
-  \item[{\code{picard_relax} (float in $(0,1]$, 1.0)}] Under-relaxation
+  \item[{\code{picard_relax} (float in $(0,1]$, or schedule, 1.0)}] Under-relaxation
   factor for the frozen KBM coefficient update:
   $c_{\mathrm{new}} = \text{relax}\cdot c_{\mathrm{computed}} + (1-\text{relax})\,c_{\mathrm{old}}$.
   Use $<1$ if the gate flip-flops between iterations; 1.0 disables it.
+  A schedule \code{[(it_start, relax), ...]} (first entry at iteration 1)
+  changes the value with Picard iteration, e.g.\ \code{[(1, 1.0), (11, 0.5), (31, 0.2)]};
+  see \code{bc_ig_helpers.check_picard_relax}. The value used is stored per
+  iteration as \code{"picard_relax"} in \code{self.picard_info["history"]}.
 \end{description}
 After a \code{"picard"} solve, \code{self.picard_info} records the
 iteration history ($\bar\alpha$, gate state, profile change) and whether

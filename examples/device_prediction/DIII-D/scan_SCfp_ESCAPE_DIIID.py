@@ -15,22 +15,39 @@ import time
 
 
 # ---------------------- COMMON USER INPUTS ----------------------
-equil_num = None # None for all
+equil_num = 5 # None for all
 # equil_list = ['125729.03589','128572.03809','128578.03658','128413.04088']
 equil_list = None
 
 alpha_crits = np.array([0.01])
-nFC_x0s = np.array([1e15])
-C_KBMs = np.array([0.3])
-De_chie_etgs = np.array([0.1])
-ncx_x0_ratios = np.array([15])
+nFC_x0s = [1e13,1e14,5e14,1e15,5e15,1e16,5e16,1e17,5e17,1e18,5e18,1e19,5e19,1e20,5e20,1e21,5e21,1e22,5e22,1e23]
+C_KBMs = np.array([0.0])
+De_chie_etgs = [0.001,0.01,0.1,1,10]
+ncx_x0_ratios = [1.0]
 
 # Overridable from the environment (see submit_scan.sh)
-sc_model = os.environ.get('SC_MODEL', '3D')
-sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'firedrake')
-ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'inner')
+sc_model = os.environ.get('SC_MODEL', '1D')
+sc_implementation = os.environ.get('SC_IMPLEMENTATION', 'scipy')
+ne_grad_bc_loc = os.environ.get('NE_GRAD_BC_LOC', 'outer')
+picard_relax = os.environ.get('PICARD_RELAX', '1.0') # float, or a schedule 'it:relax;it:relax;...' (no commas: sbatch --export splits on them)
+picard_relax = ([(int(s), float(r)) for s, r in (e.split(':') for e in picard_relax.split(';'))]
+                if ':' in picard_relax else float(picard_relax))
+picard_max_it = int(os.environ.get('PICARD_MAX_IT', 100))
+picard_rel_tol = float(os.environ.get('PICARD_REL_TOL', 1e-2)) # 0.01=1%
+run_suffix = os.environ.get('RUN_SUFFIX', '')
+eq6_form = os.environ.get('EQ6_FORM', 'complete') # 'complete' or 'paper'
+eq7_form = os.environ.get('EQ7_FORM', 'complete') # 'complete' or 'paper' (1D scipy only)
+impurity_dilution = os.environ.get('IMPURITY_DILUTION', 'none') # 'none' or 'carbon' (1D scipy only; KBM alpha)
+impurity_dilution = None if impurity_dilution.lower() == 'none' else impurity_dilution
+D_TG_treatment = os.environ.get('D_TG_TREATMENT', 'implicit') # 'implicit' or 'picard' (1D scipy only)
+picard_gate_mode = os.environ.get('PICARD_GATE_MODE', 'steep_grad') # 'average' or 'steep_grad' (KBM alpha gate)
+bvp_tol = float(os.environ.get('BVP_TOL', 1e-6)) # solve_bvp tolerance ('inner', scipy only)
+bvp_max_nodes = int(os.environ.get('BVP_MAX_NODES', 5000)) # solve_bvp max mesh nodes ('inner', scipy only)
+# First-iteration n_e pedestal top, where EPEDNN reads neped (helpers/ped_width_proxy.ped_top_width):
+# 'tanh', 'grad', 'lin', 'tanh+grad', ..., 'all' (psi_N = 1 - width), or 'corner' (two-line fit corner)
+ped_width_method = os.environ.get('PED_WIDTH_METHOD', 'tanh+grad')
 
-output_dir = f'DIIIDSnyder_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}_SCtest'
+output_dir = f'outputs/DIIIDSnyder_ESCAPE_{sc_model}{sc_implementation}{ne_grad_bc_loc}_{run_suffix}'
 # ----------------------------------------------------------------
 
 
@@ -109,12 +126,13 @@ def load_equilibrium(mhd_fp, kprof_fp):
 def kprof_to_profiles(kprof_params):
     """kprof_params -> the layout calc_pressure_profile expects, so the
     experimental pedestal pressure comes from the same profiles ESCAPE is fed.
-    With no Ti/ni keys, calc_pressure_profile uses p = 2*ne*Te."""
+    Keys follow kprof_load (psin_ne, n_e, psin_Te, T_e). With no T_i/n_i keys,
+    calc_pressure_profile uses p = 2*ne*Te."""
     return {
-        'psi_N_ne': kprof_params['psin_ne'],
-        'ne': kprof_params['n_e'],            # m^-3
-        'psi_N_Te': kprof_params['psin_Te'],
-        'Te': kprof_params['T_e'],            # keV
+        'psin_ne': kprof_params['psin_ne'],
+        'n_e': kprof_params['n_e'],           # m^-3
+        'psin_Te': kprof_params['psin_Te'],
+        'T_e': kprof_params['T_e'],           # keV
         'units': {'ne': 'm^-3', 'Te': 'keV'},
     }
 
@@ -125,9 +143,14 @@ def state_to_dict(state):
     The state object itself can't be pickled: it holds the juliacall EPEDNN
     model and (after a Firedrake solve) Firedrake meshes/Functions. Those
     attributes are left out and their names recorded under '_not_saved'.
+    juliacall values (epednn_model) do pickle, but only unpickle in a process
+    with the Julia model loaded, so they are left out too.
     """
     saved, not_saved = {}, []
     for name, val in vars(state).items():
+        if type(val).__module__.startswith('juliacall'):
+            not_saved.append(name)
+            continue
         try:
             pickle.dumps(val)
         except Exception:
@@ -140,7 +163,7 @@ def state_to_dict(state):
 
 # ESCAPE parameters
 ESCAPE_tol_max = 1e-5
-ESCAPE_iter_max = 1
+ESCAPE_iter_max = 5
 out_dir = output_dir
 ne_x0 = None, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
 quasineutral_flag = True
@@ -166,16 +189,25 @@ sc_params = {
 sc_params.update({
     'x_res':40,
     'ne_grad_bc_loc':ne_grad_bc_loc,
-    'picard_max_it':50,
-    'picard_rtol':1e-6,
-    'picard_relax':1.0,
+    # 'Saarelma2023' (Eq. 20 separatrix gradient) needs the Neumann BC at the
+    # separatrix, so the 'inner' runs fall back to the state.n_e gradient
+    'dne_method': 'Saarelma2023' if ne_grad_bc_loc == 'outer' else 'state',
+    'tau_par': 1e-3 if ne_grad_bc_loc == 'outer' else None, # s, parallel loss time (Saarelma2023 only)
+    'initial_guess':'tanh', # ESCAPE_solve overrides: 'tanh' on the first ESCAPE iteration, 'state' after
+    'picard_gate_mode':picard_gate_mode,
+    'picard_max_it':picard_max_it,
+    'picard_rtol':picard_rel_tol,
+    'picard_relax':picard_relax,
     'reuse_setup':False,
 })
 
 # SC scipy specific
 sc_params.update({
-    'bvp_tol':1e-6,
-    'bvp_max_nodes':5000,
+    'bvp_tol':bvp_tol, # solve_bvp ('inner')
+    'bvp_max_nodes':bvp_max_nodes,
+    'ivp_method':"Radau", # solve_ivp ('outer')
+    'ivp_rtol':1e-8,
+    'ivp_atol':1e-10,
 })
 
 # SC firedrake specific
@@ -199,8 +231,11 @@ sc_params.update({
 
 # SC 1D specific
 sc_params.update({
-    'eq6_form':"complete",
+    'eq6_form':eq6_form,
+    'eq7_form':eq7_form, # scipy only
+    'impurity_dilution':impurity_dilution, # scipy only
     'first_step':"auto",
+    'D_TG_treatment':D_TG_treatment, # scipy only
 })
 
 # EPEDNN parameters
@@ -267,6 +302,7 @@ for mhd_fp, kprof_fp in equilibria:
                     Z_eff = Z_eff, 
                     P_tot_e = P_tot_e, # W, total heating power given to electrons (can be assumed to be half the total heating power according to S. Saarelma et al 2023 Nucl. Fusion 63 052002), will be read from TokTox
                     ne_x0 = ne_x0, # m^-3, electron density at the separatrix (boundary condition, default is to use from profiles)        
+                    ped_width_method = ped_width_method, # first-iteration n_e pedestal top
                     equil_params = equil_params, # dictionary of required equilibrium parameters
                     kprof_params = kprof_params, # dictionary of required kinetic profile (density, temperature) parameters
                     quasineutral_flag = quasineutral_flag,
@@ -303,6 +339,7 @@ for mhd_fp, kprof_fp in equilibria:
                     'ESCAPE_ped_wid': ped_wid,
                     'experimental_ped_h': p_at_ped_top, # Pa
                     'free_params': free_params,
+                    'ped_width_method': ped_width_method,
                     'p_mode': p_mode,
                     'Zeff': Z_eff,
                     'P_tot_e': P_tot_e,
